@@ -1,5 +1,7 @@
 """通过千问平台的 OpenAI 兼容接口创建聊天模型。"""
 
+from typing import Any
+
 from langchain_openai import ChatOpenAI
 from app.config import config
 from loguru import logger
@@ -15,6 +17,9 @@ class LLMFactory:
         streaming: bool = True,
         base_url: str | None = None,
         api_key: str | None = None,
+        request_timeout: float | None = None,
+        max_retries: int = 2,
+        extra_body: dict[str, Any] | None = None,
     ) -> ChatOpenAI:
         model = model or config.qwen_chat_model
         base_url = base_url or config.qwen_api_base
@@ -28,6 +33,9 @@ class LLMFactory:
             streaming=streaming,
             base_url=base_url,
             api_key=api_key,
+            timeout=request_timeout,
+            max_retries=max_retries,
+            extra_body=extra_body,
         )
 
         return llm

@@ -189,9 +189,9 @@ def test_agent_knowledge_tool_uses_parent_context(monkeypatch):
 
     parent = make_document("父文档包含的完整排查上下文")
     retrieve = Mock(return_value=[parent])
-    monkeypatch.setattr(module.parent_document_service, "retrieve", retrieve)
+    monkeypatch.setattr(module.knowledge_retrieval_service, "retrieve", retrieve)
     context = module.retrieve_knowledge.invoke({"query": "Pending"})
-    retrieve.assert_called_once_with("Pending")
+    retrieve.assert_called_once_with("Pending", chat_history=[])
     assert parent.page_content in context
     assert parent.metadata["source"] in context
 

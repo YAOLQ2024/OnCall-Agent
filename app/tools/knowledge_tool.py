@@ -4,14 +4,15 @@ from typing import List, Tuple, Sequence
 
 from langchain_core.documents import Document
 from langchain_core.tools import tool
+from langchain.tools import ToolRuntime
 from loguru import logger
 from langsmith import traceable
 
-from app.services.parent_document_service import parent_document_service
+from app.services.knowledge_retrieval_service import knowledge_retrieval_service, history_before_current_turn
 
 
 @tool(response_format="content_and_artifact")
-def retrieve_knowledge(query: str) -> Tuple[str, List[Document]]:
+def retrieve_knowledge(query: str, runtime: ToolRuntime = None) -> Tuple[str, List[Document]]:
     """从知识库中检索相关信息来回答问题
     
     当用户的问题涉及专业知识、文档内容或需要参考资料时，使用此工具。
@@ -25,8 +26,9 @@ def retrieve_knowledge(query: str) -> Tuple[str, List[Document]]:
     try:
         logger.info(f"知识检索工具被调用: query='{query}'")
         
-        # 服务内部调用原生 ParentDocumentRetriever，返回父文档上下文。
-        docs = parent_document_service.retrieve(query)
+        # runtime 由 LangGraph 注入，不暴露给模型生成工具参数。
+        history = history_before_current_turn(runtime.state.get("messages", [])) if runtime else []
+        docs = knowledge_retrieval_service.retrieve(query, chat_history=history)
         
         if not docs:
             logger.warning("未检索到相关文档")

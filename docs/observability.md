@@ -1,5 +1,8 @@
 # LangSmith 全链路追踪与父子召回验收
 
+历史改写、条件 HyDE 和千问 API 精排的配置与验收见 [开发与验收](retrieval-development.md)。
+上一版未提交的 `rag.multi_query` 已替换为显式分流；下面的父子回取及同轮上下文去重仍然生效。
+
 应用通过 LangChain 原生 tracing 和 LangSmith `traceable` 接入追踪。
 自定义节点只记录真实方法调用，没有重复查询、重放结果或增加文档打印日志。
 此文中的终端命令由部署者执行；本次代码交付没有启动服务或向外部服务发送数据。

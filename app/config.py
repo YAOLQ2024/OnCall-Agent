@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     qwen_chat_model: str = "qwen3.8-max"
     qwen_embedding_model: str = "qwen3.7-text-embedding-flash"
     qwen_embedding_dimensions: int = 1024
+    qwen_rerank_model: str = "qwen3.7-text-rerank"
+    qwen_rerank_url: str = "https://maas.qianwenaiapi.com/api/v1/services/rerank/text-rerank/text-rerank"
+    qwen_rerank_timeout: float = Field(default=20, gt=0, le=120)
 
     # Milvus 配置
     milvus_host: str = "localhost"
@@ -59,6 +62,15 @@ class Settings(BaseSettings):
     rag_child_chunk_size: int = Field(default=400, gt=0)
     rag_child_chunk_overlap: int = Field(default=80, ge=0)
     rag_storage_timeout: int = Field(default=120, gt=0)
+    rag_query_rewrite_enabled: bool = True
+    rag_query_rewrite_timeout: float = Field(default=20, gt=0, le=120)
+    rag_history_max_messages: int = Field(default=6, ge=1, le=20)
+    rag_history_max_chars: int = Field(default=6000, ge=100, le=20000)
+    rag_hyde_enabled: bool = False
+    rag_hyde_timeout: float = Field(default=20, gt=0, le=120)
+    rag_rerank_enabled: bool = False
+    rag_rerank_top_n: int = Field(default=3, ge=1, le=20)
+    rag_rerank_score_threshold: float | None = Field(default=None, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_rag_chunks(self) -> "Settings":

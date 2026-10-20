@@ -1,7 +1,7 @@
 """验证真实调用只执行一次，追踪节点保留结构，测试不发送远程 trace。"""
 
 import os
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from langchain_core.documents import Document
@@ -99,12 +99,12 @@ async def test_knowledge_search_api_returns_service_parent_documents(monkeypatch
     from app.api import knowledge
 
     parent = Document(page_content="返回的父文档", metadata={"source": "test.md"})
-    retrieve = Mock(return_value=[parent])
-    monkeypatch.setattr(knowledge.parent_document_service, "retrieve", retrieve)
+    retrieve = AsyncMock(return_value=[parent])
+    monkeypatch.setattr(knowledge.knowledge_retrieval_service, "aretrieve", retrieve)
     response = await knowledge.search_knowledge(
         knowledge.KnowledgeSearchRequest(query="Pending", top_k=4)
     )
-    retrieve.assert_called_once_with("Pending", 4)
+    retrieve.assert_awaited_once_with("Pending", 4, chat_history=[])
     assert response["data"]["count"] == 1
     assert response["data"]["documents"][0]["page_content"] == parent.page_content
 

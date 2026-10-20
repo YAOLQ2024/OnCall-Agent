@@ -18,6 +18,7 @@ from app.agent.mcp_client import mcp_registry
 from app.core.milvus_client import milvus_manager
 from app.services.parent_document_service import parent_document_service
 from app.services.vector_store_manager import vector_store_manager
+from app.services.knowledge_retrieval_service import knowledge_retrieval_service
 from app.core.tracing import flush_langsmith
 
 
@@ -47,7 +48,10 @@ async def lifespan(app: FastAPI):
     finally:
         logger.info("🔌 正在关闭 Milvus 连接...")
         try:
-            await vector_store_manager.close()
+            try:
+                await run_in_threadpool(knowledge_retrieval_service.reranker.close)
+            finally:
+                await vector_store_manager.close()
         finally:
             try:
                 await run_in_threadpool(milvus_manager.close)

@@ -2,6 +2,10 @@
 
 > 企业级智能对话和运维助手，支持 RAG 知识库问答和 AIOps 智能诊断
 
+检索增强按有界历史改写、条件 HyDE、父子召回、千问 API 精排分层实现。
+设计取舍见 [架构决策](docs/retrieval-architecture.md)，安装、配置及页面验收见
+[开发与验收](docs/retrieval-development.md)。精排调用 `qwen3.7-text-rerank`，复用千问密钥，无需本地权重。
+
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
 [![LangChain](https://img.shields.io/badge/LangChain-latest-orange.svg)](https://www.langchain.com/)
