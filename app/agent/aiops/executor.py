@@ -5,13 +5,13 @@ Executor 节点：执行单个步骤
 
 from typing import Dict, Any
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_qwq import ChatQwen
 from langgraph.prebuilt import ToolNode
 from loguru import logger
 
 from app.config import config
+from app.core.llm_factory import llm_factory
 from app.tools import get_current_time, retrieve_knowledge
-from app.agent.mcp_client import get_mcp_client_with_retry
+from app.agent.mcp_client import mcp_registry
 from .state import PlanExecuteState
 
 
@@ -42,17 +42,15 @@ async def executor(state: PlanExecuteState) -> Dict[str, Any]:
         ]
 
         # 获取 MCP 工具
-        mcp_client = await get_mcp_client_with_retry()
-        mcp_tools = await mcp_client.get_tools()
+        _, mcp_tools = mcp_registry.snapshot()
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
 
         # 合并所有工具
         all_tools = local_tools + mcp_tools
 
         # 创建 LLM（绑定工具）
-        llm = ChatQwen(
-            model=config.rag_model,
-            api_key=config.dashscope_api_key,
+        llm = llm_factory.create_chat_model(
+            model=config.qwen_chat_model,
             temperature=0
         )
         llm_with_tools = llm.bind_tools(all_tools)
@@ -74,7 +72,7 @@ async def executor(state: PlanExecuteState) -> Dict[str, Any]:
 - 如果工具调用失败，请说明失败原因
 - 不要编造数据，只返回实际获取的信息
 - 执行结果要清晰、准确
-- 专注于当前步骤，不要考虑其他任务"""),
+- 专注于当前步骤，不要考虑其他任务""" + "\n" + mcp_registry.availability_message()),
             HumanMessage(content=f"请执行以下任务: {task}")
         ]
 

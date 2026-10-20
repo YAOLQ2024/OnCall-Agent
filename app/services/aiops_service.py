@@ -106,6 +106,9 @@ class AIOpsService:
 
             # 流式执行工作流
             config_dict = {
+                "run_name": "agent.aiops",
+                "tags": ["oncall", "aiops"],
+                "metadata": {"session_id": session_id, "thread_id": session_id},
                 "configurable": {
                     "thread_id": session_id
                 }

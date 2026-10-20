@@ -26,6 +26,19 @@
                     </svg>
                     <span>新建对话</span>
                 </button>
+                <button class="sidebar-btn" id="knowledgeBtn" type="button" aria-haspopup="dialog" aria-controls="knowledgeDialog">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M4 4H10L12 6L14 4H20V20H14L12 22L10 20H4V4ZM12 6V22" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                    </svg>
+                    <span>知识库</span>
+                </button>
+                <details class="tool-status-panel" id="toolStatusPanel">
+                    <summary>MCP 工具状态 <span id="toolStatusSummary" role="status" aria-live="polite">检测中</span></summary>
+                    <p>知识库问答不依赖 MCP，部分工具不可用时也可继续提问。</p>
+                    <div id="toolStatusList"></div>
+                    <button id="refreshToolsBtn" type="button">重新检测工具</button>
+                    <p id="toolStatusNotice" role="status" aria-live="polite"></p>
+                </details>
                 
                 <div class="chat-history-section">
                     <div class="history-header">
@@ -112,11 +125,44 @@
                             </div>
                         </div>
                     </div>
-                    <input type="file" id="fileInput" accept=".txt,.md,.markdown" style="display: none;">
                 </div>
             </div>
         </main>
     </div>
+
+    <dialog id="knowledgeDialog" class="knowledge-dialog" aria-labelledby="knowledgeTitle">
+        <div class="knowledge-header">
+            <h2 id="knowledgeTitle">知识库</h2>
+            <button id="closeKnowledgeBtn" type="button" class="knowledge-close" aria-label="关闭知识库">×</button>
+        </div>
+        <div class="knowledge-body">
+            <section class="knowledge-section" aria-labelledby="uploadTitle">
+                <h3 id="uploadTitle">上传文档</h3>
+                <p id="uploadHelp">支持 UTF-8 编码的 .md、.txt 文件，单个不超过 10 MB。选择后自动上传并建立父子索引；同名文件会更新已有内容。</p>
+                <button id="knowledgeUploadBtn" type="button" class="knowledge-primary">选择文档并建立索引</button>
+                <input type="file" id="fileInput" accept=".txt,.md" aria-describedby="uploadHelp" hidden>
+            </section>
+            <section class="knowledge-section" aria-labelledby="reindexTitle">
+                <h3 id="reindexTitle">重建目录索引</h3>
+                <p id="directoryHelp">递归处理服务端目录中的 .md、.txt 文件。相对路径从项目根目录填写；这里填写的是运行后端的电脑上的路径。</p>
+                <form id="reindexForm">
+                    <label for="indexDirectoryInput">文档目录</label>
+                    <input id="indexDirectoryInput" name="directory_path" type="text" list="knowledgeDirectories" value="data/corpus/processed" required aria-describedby="directoryHelp reindexHelp">
+                    <datalist id="knowledgeDirectories">
+                        <option value="data/corpus/processed">已清洗语料</option>
+                        <option value="uploads">已上传文档</option>
+                        <option value="aiops-docs">运维文档</option>
+                    </datalist>
+                    <p id="reindexHelp">重新切分、向量化并更新所选目录内的文件；其他来源不受影响。此操作不会移除已从磁盘删除的文件索引。</p>
+                    <button id="reindexBtn" type="submit" class="knowledge-primary">重建目录索引</button>
+                </form>
+            </section>
+            <section id="knowledgeResult" class="knowledge-result" aria-labelledby="knowledgeResultTitle" aria-busy="false">
+                <h3 id="knowledgeResultTitle" role="status" aria-live="polite" aria-atomic="true">尚未执行操作</h3>
+                <div id="knowledgeResultDetails"><p>索引完成后，可关闭此面板，直接在对话中提问。</p></div>
+            </section>
+        </div>
+    </dialog>
 
     <!-- 加载遮罩层 -->
     <div id="loadingOverlay" class="loading-overlay">

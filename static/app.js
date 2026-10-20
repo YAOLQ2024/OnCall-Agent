@@ -1,7 +1,8 @@
 // OnCall Aegnt 前端应用
 class OnCallAegntApp {
     constructor() {
-        this.apiBaseUrl = 'http://localhost:9900/api';
+        this.apiBaseUrl = '/api';
+        this.isKnowledgeBusy = false;
         this.currentMode = 'quick'; // 'quick' 或 'stream'
         this.sessionId = this.generateSessionId();
         this.isStreaming = false;
@@ -15,6 +16,13 @@ class OnCallAegntApp {
         this.initMarkdown();
         this.checkAndSetCentered();
         this.renderChatHistory();
+        this.loadToolStatus();
+        this.toolStatusTimer = setInterval(() => {
+            if (!document.hidden) this.loadToolStatus();
+        }, 10000);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) this.loadToolStatus();
+        });
     }
 
     // 初始化Markdown配置
@@ -109,6 +117,21 @@ class OnCallAegntApp {
         this.modeDropdown = document.getElementById('modeDropdown');
         this.currentModeText = document.getElementById('currentModeText');
         this.fileInput = document.getElementById('fileInput');
+        this.knowledgeBtn = document.getElementById('knowledgeBtn');
+        this.knowledgeDialog = document.getElementById('knowledgeDialog');
+        this.closeKnowledgeBtn = document.getElementById('closeKnowledgeBtn');
+        this.knowledgeUploadBtn = document.getElementById('knowledgeUploadBtn');
+        this.reindexForm = document.getElementById('reindexForm');
+        this.reindexBtn = document.getElementById('reindexBtn');
+        this.indexDirectoryInput = document.getElementById('indexDirectoryInput');
+        this.knowledgeResult = document.getElementById('knowledgeResult');
+        this.knowledgeResultTitle = document.getElementById('knowledgeResultTitle');
+        this.knowledgeResultDetails = document.getElementById('knowledgeResultDetails');
+        this.toolStatusPanel = document.getElementById('toolStatusPanel');
+        this.toolStatusSummary = document.getElementById('toolStatusSummary');
+        this.toolStatusList = document.getElementById('toolStatusList');
+        this.refreshToolsBtn = document.getElementById('refreshToolsBtn');
+        this.toolStatusNotice = document.getElementById('toolStatusNotice');
         
         // 聊天区域元素
         this.chatMessages = document.getElementById('chatMessages');
@@ -184,9 +207,8 @@ class OnCallAegntApp {
         // 工具菜单项点击事件
         if (this.uploadFileItem) {
             this.uploadFileItem.addEventListener('click', () => {
-                if (this.fileInput) {
-                    this.fileInput.click();
-                }
+                this.openKnowledgeDialog();
+                if (!this.isKnowledgeBusy) this.fileInput.click();
                 this.closeToolsMenu();
             });
         }
@@ -202,6 +224,93 @@ class OnCallAegntApp {
         
         if (this.fileInput) {
             this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
+        }
+        this.knowledgeBtn.addEventListener('click', () => this.openKnowledgeDialog());
+        this.closeKnowledgeBtn.addEventListener('click', () => this.knowledgeDialog.close());
+        this.knowledgeUploadBtn.addEventListener('click', () => {
+            if (!this.isKnowledgeBusy) this.fileInput.click();
+        });
+        this.reindexForm.addEventListener('submit', (event) => {
+            event.preventDefault();
+            this.reindexDirectory();
+        });
+        this.refreshToolsBtn.addEventListener('click', () => this.refreshTools());
+    }
+
+    async loadToolStatus() {
+        if (this.isLoadingToolStatus) return;
+        this.isLoadingToolStatus = true;
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/tools/status`, {
+                cache: 'no-store', signal: AbortSignal.timeout(5000)
+            });
+            const payload = await response.json();
+            if (!response.ok || !Array.isArray(payload.data?.servers)) {
+                throw new Error('工具状态接口不可用');
+            }
+            const data = payload.data;
+            const unavailable = data.servers.filter(server => server.status === 'unavailable');
+            const checking = data.servers.some(server => server.status === 'checking');
+            this.toolStatusSummary.textContent = unavailable.length
+                ? `${unavailable.length} 项不可用` : checking ? '检测中' : '全部可用';
+            this.toolStatusPanel.dataset.state = unavailable.length ? 'warning' : checking ? 'checking' : 'success';
+            // 首次发现故障时展开，之后尊重用户手动收起的状态。
+            if (unavailable.length && !this.hasShownToolFailure) {
+                this.toolStatusPanel.open = true;
+                this.hasShownToolFailure = true;
+            }
+            if (!unavailable.length) this.hasShownToolFailure = false;
+            this.toolStatusList.replaceChildren();
+            for (const server of data.servers) {
+                const item = document.createElement('div');
+                item.className = 'tool-service-status';
+                const title = document.createElement('strong');
+                const labels = { available: '可用', unavailable: '不可用', checking: '检测中' };
+                title.textContent = `${server.label}：${labels[server.status] || '状态未知'}`;
+                item.appendChild(title);
+                const names = document.createElement('p');
+                names.textContent = server.tools.length
+                    ? `${server.status === 'available' ? '可用工具' : '受影响工具'}：${server.tools.join('、')}`
+                    : '尚未获取工具列表';
+                item.appendChild(names);
+                const mode = document.createElement('p');
+                mode.textContent = server.transport === 'stdio' ? '本地进程由框架自动管理' : '连接外部 MCP 服务';
+                item.appendChild(mode);
+                if (server.last_error) {
+                    const error = document.createElement('p');
+                    error.className = 'tool-service-error';
+                    error.textContent = server.last_error;
+                    item.appendChild(error);
+                }
+                this.toolStatusList.appendChild(item);
+            }
+            this.refreshToolsBtn.disabled = data.refreshing;
+            this.toolStatusNotice.textContent = data.refreshing
+                ? '正在后台检测，知识库问答可继续使用。'
+                : '不可用服务会自动重试，也可点击重新检测。';
+        } catch (error) {
+            this.toolStatusSummary.textContent = '状态未知';
+            this.toolStatusPanel.dataset.state = 'warning';
+            this.toolStatusNotice.textContent = '无法获取工具状态，请检查主服务连接。';
+            this.refreshToolsBtn.disabled = false;
+        } finally {
+            this.isLoadingToolStatus = false;
+        }
+    }
+
+    async refreshTools() {
+        this.refreshToolsBtn.disabled = true;
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/tools/refresh`, {
+                method: 'POST', signal: AbortSignal.timeout(5000)
+            });
+            if (response.status !== 202) throw new Error('提交工具检测失败');
+            this.toolStatusNotice.textContent = '已提交后台检测，稍后会自动更新。';
+            await this.loadToolStatus();
+        } catch (error) {
+            this.toolStatusNotice.textContent = error.message;
+        } finally {
+            this.refreshToolsBtn.disabled = false;
         }
     }
 
@@ -692,11 +801,10 @@ class OnCallAegntApp {
                 })
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-
             const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.data?.errorMessage || data.detail || data.message || `HTTP错误: ${response.status}`);
+            }
             console.log('[sendQuickMessage] 响应数据:', JSON.stringify(data));
             
             // 移除等待提示消息
@@ -723,7 +831,7 @@ class OnCallAegntApp {
                 }
             } else {
                 // HTTP 成功但业务失败
-                throw new Error(data.message || '请求失败');
+                throw new Error(data.data?.errorMessage || data.message || '请求失败');
             }
         } catch (error) {
             // 出错时也要移除等待提示消息
@@ -1086,83 +1194,179 @@ class OnCallAegntApp {
         }, 3000);
     }
 
-    // 处理文件选择
+    openKnowledgeDialog() {
+        if (!this.knowledgeDialog.open) this.knowledgeDialog.showModal();
+    }
+
+    // 上传与重建共用任务状态，不占用聊天的流式状态。
+    setKnowledgeBusy(busy) {
+        this.isKnowledgeBusy = busy;
+        this.knowledgeUploadBtn.disabled = busy;
+        this.fileInput.disabled = busy;
+        this.reindexBtn.disabled = busy;
+        this.indexDirectoryInput.disabled = busy;
+        this.knowledgeResult.setAttribute('aria-busy', String(busy));
+    }
+
+    showKnowledgeResult(type, title, lines = [], failedFiles = {}) {
+        this.knowledgeResult.dataset.state = type;
+        this.knowledgeResultTitle.textContent = title;
+        this.knowledgeResultDetails.replaceChildren();
+        for (const line of lines) {
+            const paragraph = document.createElement('p');
+            paragraph.textContent = line;
+            this.knowledgeResultDetails.appendChild(paragraph);
+        }
+        const failures = Object.entries(failedFiles);
+        if (failures.length) {
+            const details = document.createElement('details');
+            details.open = true;
+            const summary = document.createElement('summary');
+            summary.textContent = `失败文件及原因（${failures.length}）`;
+            details.appendChild(summary);
+            const list = document.createElement('ul');
+            for (const [path, reason] of failures) {
+                const item = document.createElement('li');
+                item.textContent = `${path}：${reason}`;
+                list.appendChild(item);
+            }
+            details.appendChild(list);
+            this.knowledgeResultDetails.appendChild(details);
+        }
+    }
+
+    async knowledgeRequest(path, options) {
+        let response;
+        try {
+            response = await fetch(`${this.apiBaseUrl}${path}`, options);
+        } catch (error) {
+            throw new Error('无法连接后端或连接已中断，当前无法确认操作结果。请检查服务和网络，并查看 LangSmith 中的执行记录。');
+        }
+        let payload;
+        try {
+            payload = await response.json();
+        } catch (error) {
+            throw new Error(`后端未返回有效 JSON（HTTP ${response.status}），无法确认操作结果。请检查服务状态。`);
+        }
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            throw new Error(`后端响应格式异常（HTTP ${response.status}），无法确认操作结果。`);
+        }
+        if (!response.ok || payload.code !== 200) {
+            const detail = payload.detail;
+            const message = typeof detail === 'string' ? detail
+                : Array.isArray(detail) ? detail.map(item => item.msg).join('；')
+                : payload.message || `请求失败（HTTP ${response.status}）`;
+            throw new Error(message);
+        }
+        if (!payload.data || typeof payload.data !== 'object' || Array.isArray(payload.data)) {
+            throw new Error('后端响应缺少操作结果，无法确认是否完成。');
+        }
+        return payload.data;
+    }
+
+    // 处理文件选择；立即重置，允许失败后重新选择同一文件。
     handleFileSelect(event) {
         const file = event.target.files[0];
-        if (file) {
-            // 验证文件格式
-            if (!this.validateFileType(file)) {
-                this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
-                this.fileInput.value = '';
-                return;
-            }
-            this.uploadFile(file);
-        }
+        event.target.value = '';
+        if (file) this.uploadFile(file);
     }
 
     // 验证文件类型
     validateFileType(file) {
         const fileName = file.name.toLowerCase();
-        const allowedExtensions = ['.txt', '.md', '.markdown'];
+        const allowedExtensions = ['.txt', '.md'];
         return allowedExtensions.some(ext => fileName.endsWith(ext));
     }
 
     // 上传文件到知识库
     async uploadFile(file) {
-        // 再次验证文件类型（双重保险）
+        if (this.isKnowledgeBusy) return;
+        this.openKnowledgeDialog();
         if (!this.validateFileType(file)) {
-            this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
+            this.showKnowledgeResult('error', '文件格式不支持', ['只支持 .txt 和 .md 文件。']);
             return;
         }
-
-        // 验证文件大小（限制为50MB）
-        const maxSize = 50 * 1024 * 1024;
-        if (file.size > maxSize) {
-            this.showNotification('文件大小不能超过50MB', 'error');
+        if (file.size === 0 || file.size > 10 * 1024 * 1024) {
+            this.showKnowledgeResult('error', '文件大小不符合要求', ['文件不能为空，且不能超过 10 MB。']);
             return;
         }
-
-        // 锁定前端并显示上传遮罩层
-        this.isStreaming = true;
-        this.updateUI();
-        this.showUploadOverlay(true, file.name);
-
+        this.setKnowledgeBusy(true);
+        this.showKnowledgeResult('running', '正在上传并建立父子索引…', [
+            `文件：${file.name}（${this.formatFileSize(file.size)}）`,
+            '正在加载、切分、向量化并保存索引。完成前请保留当前页面；关闭面板不会取消任务。'
+        ]);
         try {
-            // 创建 FormData
             const formData = new FormData();
             formData.append('file', file);
-
-            // 发送上传请求
-            const response = await fetch(`${this.apiBaseUrl}/upload`, {
-                method: 'POST',
-                body: formData
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
+            const result = await this.knowledgeRequest('/upload', { method: 'POST', body: formData });
+            if (!Number.isInteger(result.index?.parent_count) || result.index.parent_count < 1) {
+                throw new Error('后端未返回有效的父文档数量，无法确认索引是否完成。');
             }
-
-            const data = await response.json();
-
-            if ((data.code === 200 || data.message === 'success') && data.data) {
-                // 在聊天界面显示上传成功消息
-                const successMessage = `${file.name} 上传到知识库成功`;
-                this.addMessage('assistant', successMessage, false, true);
-            } else {
-                throw new Error(data.message || '上传失败');
-            }
+            this.showKnowledgeResult('success', '上传并建立索引成功', [
+                `文件：${result.filename}`,
+                `生成父文档：${result.index.parent_count} 个；关联子文档已向量化入库。`,
+                '现在可以关闭面板，在对话中提问。'
+            ]);
+            this.showNotification('文档索引已完成', 'success');
         } catch (error) {
-            console.error('文件上传失败:', error);
-            this.showNotification('文件上传失败: ' + error.message, 'error');
+            this.showKnowledgeResult('error', '上传或索引未完成确认', [error.message]);
+            this.showNotification('文档处理失败，请查看知识库面板', 'error');
         } finally {
-            // 清空文件输入
-            if (this.fileInput) {
-                this.fileInput.value = '';
+            this.setKnowledgeBusy(false);
+        }
+    }
+
+    async reindexDirectory() {
+        if (this.isKnowledgeBusy) return;
+        const directory = this.indexDirectoryInput.value.trim();
+        if (!directory) {
+            this.showKnowledgeResult('error', '请填写文档目录', ['例如：data/corpus/processed、uploads 或 aiops-docs。']);
+            this.indexDirectoryInput.focus();
+            return;
+        }
+        this.indexDirectoryInput.value = directory;
+        this.setKnowledgeBusy(true);
+        this.showKnowledgeResult('running', '正在重建目录索引…', [
+            `目录：${directory}`,
+            '文件较多时需要等待。完成前请保留当前页面；关闭面板不会取消任务。'
+        ]);
+        try {
+            const params = new URLSearchParams({ directory_path: directory });
+            const result = await this.knowledgeRequest(`/index_directory?${params}`, { method: 'POST' });
+            const counts = [result.total_files, result.success_count, result.fail_count];
+            if (!counts.every(value => Number.isInteger(value) && value >= 0)
+                || result.total_files !== result.success_count + result.fail_count) {
+                throw new Error('后端返回的文件统计不完整，无法确认重建结果。');
             }
-            // 解锁前端
-            this.isStreaming = false;
-            this.showUploadOverlay(false);
-            this.updateUI();
+            const lines = [
+                `目录：${result.directory_path || directory}`,
+                `文件总数：${result.total_files}；成功：${result.success_count}；失败：${result.fail_count}`
+            ];
+            if (Number.isFinite(result.duration_ms)) {
+                lines.push(`耗时：${(result.duration_ms / 1000).toFixed(1)} 秒`);
+            }
+            if (result.error_message) lines.push(result.error_message);
+            let type;
+            let title;
+            if (result.success !== true || result.fail_count > 0 || result.error_message) {
+                type = result.success_count > 0 ? 'warning' : 'error';
+                title = result.success_count > 0 ? '部分文件索引失败' : '目录索引失败';
+            } else if (result.total_files === 0) {
+                type = 'warning';
+                title = '目录中没有可索引的文档';
+                lines.push('未更新索引。请确认目录中存在 .md 或 .txt 文件。');
+            } else {
+                type = 'success';
+                title = '目录索引重建完成';
+                lines.push('所列文件的父子索引已更新，可以返回对话提问。');
+            }
+            this.showKnowledgeResult(type, title, lines, result.failed_files || {});
+            this.showNotification(title, type);
+        } catch (error) {
+            this.showKnowledgeResult('error', '目录重建未完成确认', [error.message]);
+            this.showNotification('重建失败，请查看知识库面板', 'error');
+        } finally {
+            this.setKnowledgeBusy(false);
         }
     }
 
@@ -1637,25 +1841,6 @@ class OnCallAegntApp {
         }
     }
 
-    // 显示/隐藏上传遮罩层
-    showUploadOverlay(show, fileName = '') {
-        if (this.loadingOverlay) {
-            if (show) {
-                this.loadingOverlay.style.display = 'flex';
-                // 更新文字为上传中
-                const loadingText = this.loadingOverlay.querySelector('.loading-text');
-                const loadingSubtext = this.loadingOverlay.querySelector('.loading-subtext');
-                if (loadingText) loadingText.textContent = '正在上传文件...';
-                if (loadingSubtext) loadingSubtext.textContent = fileName ? `上传: ${fileName}` : '请稍候';
-                // 防止页面滚动
-                document.body.style.overflow = 'hidden';
-            } else {
-                this.loadingOverlay.style.display = 'none';
-                // 恢复页面滚动
-                document.body.style.overflow = '';
-            }
-        }
-    }
 }
 
 // 添加CSS动画

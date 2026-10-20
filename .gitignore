@@ -43,6 +43,7 @@ poetry.lock
 .codebuddy/
 
 # Environment
+.env
 .env.local
 
 # Logs
@@ -60,6 +61,10 @@ volumes/
 # Uploads
 uploads/
 *.tmp
+
+# ParentDocumentRetriever 本地父文档存储
+data/corpus/parent_store/
+data/knowledge/
 
 # OS
 .DS_Store

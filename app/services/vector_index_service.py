@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from loguru import logger
+from langsmith import traceable
 
-from app.services.document_splitter_service import document_splitter_service
-from app.services.vector_store_manager import vector_store_manager
+from app.services.document_loader_service import DocumentLoaderService
+from app.services.parent_document_service import parent_document_service
 
 
 class IndexingResult:
@@ -57,13 +58,17 @@ class IndexingResult:
 
 
 class VectorIndexService:
-    """向量索引服务 - 负责读取文件、生成向量、存储到 Milvus"""
+    """文件索引入口，负责加载文档并更新父子知识索引。"""
 
     def __init__(self):
         """初始化向量索引服务"""
         self.upload_path = "./uploads"
         logger.info("向量索引服务初始化完成")
 
+    @traceable(
+        name="knowledge.index_directory", run_type="chain",
+        process_outputs=lambda result: result.to_dict() if result is not None else {},
+    )
     def index_directory(self, directory_path: Optional[str] = None) -> IndexingResult:
         """
         索引指定目录下的所有文件
@@ -88,7 +93,10 @@ class VectorIndexService:
             result.directory_path = str(dir_path)
 
             # 获取所有支持的文件
-            files = list(dir_path.glob("*.txt")) + list(dir_path.glob("*.md"))
+            files = sorted(
+                path for path in dir_path.rglob("*")
+                if path.is_file() and path.suffix.lower() in {".txt", ".md"}
+            )
 
             if not files:
                 logger.warning(f"目录中没有找到支持的文件: {target_path}")
@@ -128,9 +136,10 @@ class VectorIndexService:
             result.end_time = datetime.now()
             return result
 
+    @traceable(name="knowledge.index_file", run_type="chain")
     def index_single_file(self, file_path: str):
         """
-        索引单个文件 (使用新的 LangChain 分割器)
+        索引单个文件，交给 ParentDocumentRetriever 完成父子切分和写入。
 
         Args:
             file_path: 文件路径
@@ -147,24 +156,8 @@ class VectorIndexService:
         logger.info(f"开始索引文件: {path}")
 
         try:
-            # 1. 读取文件内容
-            content = path.read_text(encoding="utf-8")
-            logger.info(f"读取文件: {path}, 内容长度: {len(content)} 字符")
-
-            # 2. 删除该文件的旧数据（如果存在）
-            normalized_path = path.as_posix()
-            vector_store_manager.delete_by_source(normalized_path)
-
-            # 3. 使用新的文档分割器
-            documents = document_splitter_service.split_document(content, normalized_path)
-            logger.info(f"文档分割完成: {file_path} -> {len(documents)} 个分片")
-
-            # 4. 添加文档到向量存储
-            if documents:
-                vector_store_manager.add_documents(documents)
-                logger.info(f"文件索引完成: {file_path}, 共 {len(documents)} 个分片")
-            else:
-                logger.warning(f"文件内容为空或无法分割: {file_path}")
+            document = DocumentLoaderService.load_file(path)
+            return parent_document_service.index_document(document)
 
         except Exception as e:
             logger.error(f"索引文件失败: {file_path}, 错误: {e}")

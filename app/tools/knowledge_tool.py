@@ -1,13 +1,13 @@
 """知识检索工具 - 从向量数据库中检索相关信息"""
 
-from typing import List, Tuple
+from typing import List, Tuple, Sequence
 
 from langchain_core.documents import Document
 from langchain_core.tools import tool
 from loguru import logger
+from langsmith import traceable
 
-from app.config import config
-from app.services.vector_store_manager import vector_store_manager
+from app.services.parent_document_service import parent_document_service
 
 
 @tool(response_format="content_and_artifact")
@@ -25,13 +25,8 @@ def retrieve_knowledge(query: str) -> Tuple[str, List[Document]]:
     try:
         logger.info(f"知识检索工具被调用: query='{query}'")
         
-        # 从向量存储中检索相关文档
-        vector_store = vector_store_manager.get_vector_store()
-        retriever = vector_store.as_retriever(
-            search_kwargs={"k": config.rag_top_k}
-        )
-        
-        docs = retriever.invoke(query)
+        # 服务内部调用原生 ParentDocumentRetriever，返回父文档上下文。
+        docs = parent_document_service.retrieve(query)
         
         if not docs:
             logger.warning("未检索到相关文档")
@@ -48,7 +43,8 @@ def retrieve_knowledge(query: str) -> Tuple[str, List[Document]]:
         return f"检索知识时发生错误: {str(e)}", []
 
 
-def format_docs(docs: List[Document]) -> str:
+@traceable(name="rag.format_context", run_type="chain")
+def format_docs(docs: List[Document], *, reference_numbers: Sequence[int] | None = None) -> str:
     """
     格式化文档列表为上下文文本
     
@@ -58,23 +54,26 @@ def format_docs(docs: List[Document]) -> str:
     Returns:
         str: 格式化的上下文文本
     """
+    if reference_numbers is not None and len(reference_numbers) != len(docs):
+        raise ValueError("参考资料编号数量必须与文档数量一致")
     formatted_parts = []
     
     for i, doc in enumerate(docs, 1):
         # 提取元数据
         metadata = doc.metadata
-        source = metadata.get("_file_name", "未知来源")
+        source = metadata.get("source") or metadata.get("_source") or "未知来源"
         
         # 提取标题信息 (如果有)
         headers = []
-        for key in ["h1", "h2", "h3"]:
+        for key in ["h1", "h2", "h3", "h4"]:
             if key in metadata and metadata[key]:
                 headers.append(metadata[key])
         
-        header_str = " > ".join(headers) if headers else ""
+        header_str = " > ".join(headers) if headers else metadata.get("title", "")
         
         # 构建格式化文本
-        formatted = f"【参考资料 {i}】"
+        number = reference_numbers[i - 1] if reference_numbers is not None else i
+        formatted = f"【参考资料 {number}】"
         if header_str:
             formatted += f"\n标题: {header_str}"
         formatted += f"\n来源: {source}"

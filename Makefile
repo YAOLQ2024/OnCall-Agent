@@ -252,52 +252,19 @@ stop-monitor:
 
 # 检查 MCP 服务状态
 status-mcp:
-	@echo "$(YELLOW)📊 MCP 服务状态:$(NC)"
+	@echo "$(YELLOW)MCP 工具状态（与页面使用同一状态接口）:$(NC)"
+	@curl -sS -f --max-time 5 $(SERVER_URL)/api/tools/status
 	@echo ""
-	@echo "$(CYAN)CLS MCP 服务:$(NC)"
-	@if pgrep -f "mcp_servers/cls_server.py" > /dev/null 2>&1; then \
-		pid=$$(pgrep -f "mcp_servers/cls_server.py"); \
-		echo "  状态: $(GREEN)运行中$(NC)"; \
-		echo "  PID: $$pid"; \
-		echo "  URL: http://127.0.0.1:8003/mcp"; \
-		curl -s http://127.0.0.1:8003/mcp > /dev/null 2>&1 && \
-			echo "  连接: $(GREEN)✅ 正常$(NC)" || \
-			echo "  连接: $(RED)❌ 无法连接$(NC)"; \
-	else \
-		echo "  状态: $(RED)未运行$(NC)"; \
-	fi
-	@echo ""
-	@echo "$(CYAN)Monitor MCP 服务:$(NC)"
-	@if pgrep -f "mcp_servers/monitor_server.py" > /dev/null 2>&1; then \
-		pid=$$(pgrep -f "mcp_servers/monitor_server.py"); \
-		echo "  状态: $(GREEN)运行中$(NC)"; \
-		echo "  PID: $$pid"; \
-		echo "  URL: http://127.0.0.1:8004/mcp"; \
-		curl -s http://127.0.0.1:8004/mcp > /dev/null 2>&1 && \
-			echo "  连接: $(GREEN)✅ 正常$(NC)" || \
-			echo "  连接: $(RED)❌ 无法连接$(NC)"; \
-	else \
-		echo "  状态: $(RED)未运行$(NC)"; \
-	fi
-	@echo ""
-	@echo "$(CYAN)Math MCP 服务:$(NC)"
-	@echo "  状态: $(YELLOW)已移除（示例服务）$(NC)"
 
 # ============================================================
 # FastAPI 服务管理
 # ============================================================
 
-# 启动所有服务（MCP + FastAPI）
+# 启动主应用；内置 MCP 通过框架 stdio 自动管理。
 start:
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
 	@echo "$(GREEN)🚀 启动所有服务$(NC)"
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
-	@echo ""
-	@$(MAKE) start-cls
-	@sleep 1
-	@echo ""
-	@$(MAKE) start-monitor
-	@sleep 1
 	@echo ""
 	@$(MAKE) start-api
 	@echo ""
@@ -320,17 +287,13 @@ start-api:
 		echo "$(YELLOW)   日志: server.log$(NC)"; \
 	fi
 
-# 停止所有服务（FastAPI + MCP）
+# 停止主应用；由框架清理托管子进程，独立部署的 HTTP 服务另行管理。
 stop:
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
 	@echo "$(GREEN)🛑 停止所有服务$(NC)"
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
 	@echo ""
 	@$(MAKE) stop-api
-	@echo ""
-	@$(MAKE) stop-cls
-	@echo ""
-	@$(MAKE) stop-monitor
 	@echo ""
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
 	@echo "$(GREEN)✅ 所有服务已停止！$(NC)"

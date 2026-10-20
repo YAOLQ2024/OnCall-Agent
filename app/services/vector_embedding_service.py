@@ -5,12 +5,13 @@ from typing import List
 from langchain_core.embeddings import Embeddings
 from openai import OpenAI
 from loguru import logger
+from langsmith import traceable
 
 from app.config import config
 
 
-class DashScopeEmbeddings(Embeddings):
-    """阿里云 DashScope Text Embedding (OpenAI 兼容模式)
+class QwenEmbeddings(Embeddings):
+    """千问平台文本向量服务（OpenAI 兼容模式）。
     
     实现 LangChain 标准 Embeddings 接口:
     - embed_documents(texts: List[str]) → List[List[float]]: 批量嵌入文档
@@ -20,41 +21,39 @@ class DashScopeEmbeddings(Embeddings):
     def __init__(
         self,
         api_key: str,
-        model: str = "text-embedding-v4",
+        model: str,
         dimensions: int = 1024,
+        base_url: str = "https://maas.qianwenaiapi.com/compatible-mode/v1",
     ):
         """
-        初始化 DashScope Embeddings
+        初始化千问平台 Embeddings
         
         Args:
-            api_key: DashScope API Key
+            api_key: 千问平台 API Key
             model: 嵌入模型名称
             dimensions: 向量维度
         """
         if not api_key or api_key == "your-api-key-here":
-            raise ValueError("请设置环境变量 DASHSCOPE_API_KEY")
+            raise ValueError("请设置环境变量 QWEN_API_KEY")
         
         self.client = OpenAI(
             api_key=api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+            base_url=base_url,
         )
         self.model = model
         self.dimensions = dimensions
         
-        # 打印初始化信息
-        masked_key = self._mask_api_key(api_key)
         logger.info(
-            f"DashScope Embeddings 初始化完成 - "
-            f"模型: {model}, 维度: {dimensions}, API Key: {masked_key}"
+            f"千问 Embeddings 初始化完成 - 模型: {model}, 维度: {dimensions}"
         )
 
-    @staticmethod
-    def _mask_api_key(api_key: str) -> str:
-        """掩码 API Key 用于日志"""
-        if len(api_key) > 8:
-            return f"{api_key[:8]}...{api_key[-4:]}"
-        return "***"
-
+    @traceable(
+        name="embedding.documents", run_type="embedding",
+        process_outputs=lambda vectors: {
+            "count": len(vectors) if vectors else 0,
+            "dimensions": len(vectors[0]) if vectors else 0,
+        },
+    )
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """
         批量嵌入文档列表 (LangChain 标准接口)
@@ -88,6 +87,10 @@ class DashScopeEmbeddings(Embeddings):
             logger.error(f"批量嵌入失败: {e}")
             raise RuntimeError(f"批量嵌入失败: {e}") from e
 
+    @traceable(
+        name="embedding.query", run_type="embedding",
+        process_outputs=lambda vector: {"dimensions": len(vector) if vector else 0},
+    )
     def embed_query(self, text: str) -> List[float]:
         """
         嵌入单个查询文本 (LangChain 标准接口)
@@ -122,8 +125,9 @@ class DashScopeEmbeddings(Embeddings):
 
 
 # 全局单例
-vector_embedding_service = DashScopeEmbeddings(
-    api_key=config.dashscope_api_key,
-    model=config.dashscope_embedding_model,
-    dimensions=1024
+vector_embedding_service = QwenEmbeddings(
+    api_key=config.qwen_api_key,
+    base_url=config.qwen_api_base,
+    model=config.qwen_embedding_model,
+    dimensions=config.qwen_embedding_dimensions,
 )

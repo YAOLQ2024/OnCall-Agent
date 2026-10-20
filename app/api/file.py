@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.services.vector_index_service import vector_index_service
 from loguru import logger
@@ -51,17 +52,18 @@ async def upload_file(file: UploadFile = File(...)):
         # 5. 保存文件
         file_path = UPLOAD_DIR / safe_filename
 
-        # 如果文件已存在，先删除旧文件（实现覆盖更新）
+        # 完成输入校验后再覆盖已有文件。
         if file_path.exists():
             logger.info(f"文件已存在，将覆盖: {file_path}")
-            file_path.unlink()
 
         # 读取并保存文件内容
-        content = await file.read()
+        content = await file.read(MAX_FILE_SIZE + 1)
 
         # 验证文件大小
         if len(content) > MAX_FILE_SIZE:
             raise HTTPException(status_code=400, detail=f"文件大小超过限制（最大 {MAX_FILE_SIZE} 字节）")
+        if not content:
+            raise HTTPException(status_code=400, detail="上传文件不能为空")
 
         file_path.write_bytes(content)
 
@@ -70,11 +72,13 @@ async def upload_file(file: UploadFile = File(...)):
         # 5. 自动创建向量索引
         try:
             logger.info(f"开始为上传文件创建向量索引: {file_path}")
-            vector_index_service.index_single_file(str(file_path))
+            index_result = await run_in_threadpool(
+                vector_index_service.index_single_file, str(file_path)
+            )
             logger.info(f"向量索引创建成功: {file_path}")
         except Exception as e:
             logger.error(f"向量索引创建失败: {file_path}, 错误: {e}")
-            # 注意：即使索引失败，文件上传仍然成功，只是记录错误日志
+            raise HTTPException(status_code=500, detail=f"文件已保存，但父子索引失败：{e}") from e
 
         # 6. 返回响应
         return JSONResponse(
@@ -86,6 +90,7 @@ async def upload_file(file: UploadFile = File(...)):
                     "filename": safe_filename,
                     "file_path": str(file_path),
                     "size": len(content),
+                    "index": index_result,
                 },
             },
         )
@@ -112,7 +117,7 @@ async def index_directory(directory_path: str = None):
         logger.info(f"开始索引目录: {directory_path or 'uploads'}")
 
         # 执行索引
-        result = vector_index_service.index_directory(directory_path)
+        result = await run_in_threadpool(vector_index_service.index_directory, directory_path)
 
         return JSONResponse(
             status_code=200,

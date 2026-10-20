@@ -6,13 +6,14 @@ Replanner 节点：重新规划或生成最终响应
 from textwrap import dedent
 from typing import Dict, Any, List
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_qwq import ChatQwen
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from loguru import logger
 
 from app.config import config
+from app.core.llm_factory import llm_factory
 from app.tools import get_current_time, retrieve_knowledge
-from app.agent.mcp_client import get_mcp_client_with_retry
+from app.agent.mcp_client import mcp_registry
 from .state import PlanExecuteState
 from .utils import format_tools_description
 
@@ -130,9 +131,8 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
     MAX_STEPS = 8
     if len(past_steps) >= MAX_STEPS:
         logger.warning(f"已执行 {len(past_steps)} 个步骤，超过最大限制 {MAX_STEPS}，强制生成最终响应")
-        llm = ChatQwen(
-            model=config.rag_model,
-            api_key=config.dashscope_api_key,
+        llm = llm_factory.create_chat_model(
+            model=config.qwen_chat_model,
             temperature=0
         )
         return await _generate_response(state, llm)
@@ -146,23 +146,21 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
         ]
 
         # 获取 MCP 工具
-        mcp_client = await get_mcp_client_with_retry()
-        mcp_tools = await mcp_client.get_tools()
+        _, mcp_tools = mcp_registry.snapshot()
 
         # 合并所有工具
         all_tools = local_tools + mcp_tools
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
 
         # 格式化工具描述
-        tools_description = format_tools_description(all_tools)
+        tools_description = format_tools_description(all_tools) + "\n" + mcp_registry.availability_message()
     except Exception as e:
         logger.warning(f"获取工具列表失败: {e}")
         tools_description = "无法获取工具列表"
 
     # 创建 LLM
-    llm = ChatQwen(
-        model=config.rag_model,
-        api_key=config.dashscope_api_key,
+    llm = llm_factory.create_chat_model(
+        model=config.qwen_chat_model,
         temperature=0
     )
 
@@ -242,7 +240,7 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
         return await _generate_response(state, llm)
 
 
-async def _generate_response(state: PlanExecuteState, llm: ChatQwen) -> Dict[str, Any]:
+async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI) -> Dict[str, Any]:
     """生成最终响应"""
     logger.info("生成最终响应...")
 

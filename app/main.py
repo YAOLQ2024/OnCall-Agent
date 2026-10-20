@@ -8,12 +8,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
+from starlette.concurrency import run_in_threadpool
 import os
 
 from app.config import config
 from loguru import logger
-from app.api import chat, health, file, aiops
+from app.api import chat, health, file, aiops, knowledge, tools
+from app.agent.mcp_client import mcp_registry
 from app.core.milvus_client import milvus_manager
+from app.services.parent_document_service import parent_document_service
+from app.services.vector_store_manager import vector_store_manager
+from app.core.tracing import flush_langsmith
 
 
 @asynccontextmanager
@@ -28,17 +33,30 @@ async def lifespan(app: FastAPI):
     
     # 连接 Milvus
     logger.info("🔌 正在连接 Milvus...")
-    milvus_manager.connect()
-    logger.info("✅ Milvus 连接成功")
-    
-    logger.info("=" * 60)
-    
-    yield
-    
-    # 关闭时执行
-    logger.info("🔌 正在关闭 Milvus 连接...")
-    milvus_manager.close()
-    logger.info(f"👋 {config.app_name} 关闭")
+    try:
+        await run_in_threadpool(milvus_manager.connect)
+        await vector_store_manager.initialize()
+        await run_in_threadpool(parent_document_service.initialize)
+        await mcp_registry.start()
+        logger.info("✅ Milvus 连接成功")
+        logger.info("=" * 60)
+        try:
+            yield
+        finally:
+            await mcp_registry.close()
+    finally:
+        logger.info("🔌 正在关闭 Milvus 连接...")
+        try:
+            await vector_store_manager.close()
+        finally:
+            try:
+                await run_in_threadpool(milvus_manager.close)
+            finally:
+                try:
+                    await run_in_threadpool(flush_langsmith)
+                except Exception as exc:
+                    logger.warning("LangSmith 追踪缓冲区提交失败：{}", exc)
+        logger.info(f"👋 {config.app_name} 关闭")
 
 
 # 创建 FastAPI 应用
@@ -63,6 +81,8 @@ app.include_router(health.router, tags=["健康检查"])
 app.include_router(chat.router, prefix="/api", tags=["对话"])
 app.include_router(file.router, prefix="/api", tags=["文件管理"])
 app.include_router(aiops.router, prefix="/api", tags=["AIOps智能运维"])
+app.include_router(knowledge.router, prefix="/api", tags=["知识库检索"])
+app.include_router(tools.router, prefix="/api", tags=["工具状态"])
 
 # 挂载静态文件
 static_dir = "static"

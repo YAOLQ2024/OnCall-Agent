@@ -1,0 +1,12 @@
+# 数据来源声明，不存放可以从正文或文件路径自动提取的字段。
+schema_version = 1
+default_document = "kubernetes/debug-pods.md"
+
+[sources.kubernetes]
+# 本语料数据源为 Kubernetes 中文文档；这是来源声明，不是自动语言识别结果。
+language = "zh-CN"
+
+# 原网页地址来自本次文档准备记录，加载时不联网，也不根据文件名猜测 URL。
+# 后续采集流程应在保存原文时同步记录此映射。
+[documents."kubernetes/debug-pods.md"]
+source_url = "https://kubernetes.io/zh-cn/docs/tasks/debug/debug-application/debug-pods/"

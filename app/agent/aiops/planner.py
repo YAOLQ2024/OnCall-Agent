@@ -6,13 +6,13 @@ Planner 节点：制定执行计划
 from textwrap import dedent
 from typing import Dict, Any, List
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_qwq import ChatQwen
 from pydantic import BaseModel, Field
 from loguru import logger
 
 from app.config import config
+from app.core.llm_factory import llm_factory
 from app.tools import get_current_time, retrieve_knowledge
-from app.agent.mcp_client import get_mcp_client_with_retry
+from app.agent.mcp_client import mcp_registry
 from .state import PlanExecuteState
 from .utils import format_tools_description
 
@@ -97,15 +97,14 @@ async def planner(state: PlanExecuteState) -> Dict[str, Any]:
         ]
 
         # 获取 MCP 工具
-        mcp_client = await get_mcp_client_with_retry()
-        mcp_tools = await mcp_client.get_tools()
+        _, mcp_tools = mcp_registry.snapshot()
 
         # 合并所有工具
         all_tools = local_tools + mcp_tools
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
 
         # 格式化工具描述
-        tools_description = format_tools_description(all_tools)
+        tools_description = format_tools_description(all_tools) + "\n" + mcp_registry.availability_message()
 
         # 步骤3: 格式化经验文档上下文
         if experience_docs:
@@ -122,9 +121,8 @@ async def planner(state: PlanExecuteState) -> Dict[str, Any]:
             experience_context = ""
 
         # 步骤4: 创建 LLM 并生成计划
-        llm = ChatQwen(
-            model=config.rag_model,
-            api_key=config.dashscope_api_key,
+        llm = llm_factory.create_chat_model(
+            model=config.qwen_chat_model,
             temperature=0
         )
 

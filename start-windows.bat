@@ -118,22 +118,9 @@ if not errorlevel 1 (
 echo [成功] Milvus 数据库就绪
 echo.
 
-REM 启动 CLS MCP 服务
-echo [5/6] 启动 CLS MCP 服务...
-start "CLS MCP Server" /min %PYTHON_CMD% mcp_servers/cls_server.py
-timeout /t 2 /nobreak >nul
-echo [成功] CLS MCP 服务已启动
-echo.
-
-REM 启动 Monitor MCP 服务
-echo [6/6] 启动 Monitor MCP 服务...
-start "Monitor MCP Server" /min %PYTHON_CMD% mcp_servers/monitor_server.py
-timeout /t 2 /nobreak >nul
-echo [成功] Monitor MCP 服务已启动
-echo.
-
 REM 启动 FastAPI 服务
-echo [7/8] 启动 FastAPI 服务...
+echo [5/5] 启动 FastAPI 服务...
+echo [信息] 内置 MCP 由主应用通过 stdio 自动管理，失败时知识库问答仍可用
 start "OnCall Aegnt API" %PYTHON_CMD% -m uvicorn app.main:app --host 0.0.0.0 --port 9900
 echo [信息] 等待服务启动（15秒）...
 timeout /t 15 /nobreak >nul
@@ -149,13 +136,7 @@ if errorlevel 1 (
     echo [成功] FastAPI 服务运行正常
     echo.
     
-    REM 调用 API 上传 aiops-docs 文档到向量数据库
-    echo [8/8] 上传文档到向量数据库...
-    for %%f in (aiops-docs\*.md) do (
-        echo   上传: %%~nxf
-        curl -s -X POST http://localhost:9900/api/upload -F "file=@%%f" >nul 2>&1
-    )
-    echo [成功] 文档上传完成
+    echo [信息] 请在页面“知识库”中上传文档或重建索引，启动时不重复向量化
 )
 
 echo.
@@ -167,8 +148,7 @@ echo API 文档: http://localhost:9900/docs
 echo.
 echo 查看日志:
 echo   - FastAPI: logs\app_*.log（Loguru 日志，按天轮转）
-echo   - CLS MCP: type mcp_cls.log
-echo   - Monitor: type mcp_monitor.log
+echo   - MCP 状态: 页面左侧“MCP 工具状态”
 echo 停止服务: stop-windows.bat
 echo ====================================
 pause

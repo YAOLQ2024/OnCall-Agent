@@ -4,6 +4,7 @@
 """
 
 import logging
+import sys
 import functools
 import json
 from typing import Dict, Any, Optional
@@ -467,4 +468,7 @@ def search_log(
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http", host="127.0.0.1", port=8003, path="/mcp")
+    if "--stdio" in sys.argv:
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(transport="streamable-http", host="127.0.0.1", port=8003, path="/mcp")

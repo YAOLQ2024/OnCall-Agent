@@ -1,8 +1,4 @@
-"""RAG Agent 服务 - 基于 LangGraph 的智能代理
-
-使用 langchain_qwq 的 ChatQwen 原生集成，
-支持真正的流式输出和更好的模型适配。
-"""
+"""RAG Agent 服务 - 基于 LangGraph 和千问 OpenAI 兼容接口。"""
 
 from typing import Annotated, Any, AsyncGenerator, Dict, Sequence
 
@@ -16,17 +12,13 @@ from langchain_core.messages import (
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from loguru import logger
+from langsmith import traceable
 from typing_extensions import TypedDict
-from langchain_qwq import ChatQwen
-
 from app.config import config
+from app.core.llm_factory import llm_factory
 from app.tools import get_current_time, retrieve_knowledge
-from app.agent.mcp_client import get_mcp_client_with_retry
-
-# 阿里千问大模型和langchain集成参考： https://docs.langchain.com/oss/python/integrations/chat/qwen
-# 注意：需要配置环境变量 DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1 否则默认访问的是新加坡站点
-# 同时也需要配置环境变量 DASHSCOPE_API_KEY=your_api_key
-
+from app.agent.mcp_client import mcp_registry
+from app.agent.rag_context_middleware import RagContextDedupMiddleware
 
 class AgentState(TypedDict):
     """Agent 状态"""
@@ -74,7 +66,7 @@ def trim_messages_middleware(state: AgentState) -> dict[str, Any] | None:
 
 
 class RagAgentService:
-    """RAG Agent 服务 - 使用 LangGraph + ChatQwen 原生集成"""
+    """RAG Agent 服务 - 使用 LangGraph + 千问 OpenAI 兼容接口"""
 
     def __init__(self, streaming: bool = True):
         """初始化 RAG Agent 服务
@@ -82,14 +74,13 @@ class RagAgentService:
         Args:
             streaming: 是否启用流式输出，默认为 True
         """
-        self.model_name = config.rag_model
+        self.model_name = config.qwen_chat_model
         self.streaming = streaming
         self.system_prompt = self._build_system_prompt()
 
 
-        self.model = ChatQwen(
+        self.model = llm_factory.create_chat_model(
             model=self.model_name,
-            api_key=config.dashscope_api_key,
             temperature=0.7,
             streaming=streaming,
         )
@@ -105,21 +96,19 @@ class RagAgentService:
 
         # Agent 初始化（会在异步方法中完成）
         self.agent = None
-        self._agent_initialized = False
+        self._tools_version = -1
 
-        logger.info(f"RAG Agent 服务初始化完成 (ChatQwen), model={self.model_name}, streaming={streaming}")
+        logger.info(f"RAG Agent 服务初始化完成 (Qwen), model={self.model_name}, streaming={streaming}")
 
+    @traceable(
+        name="agent.initialize", run_type="chain",
+        process_outputs=lambda result: {"initialized": result is not None},
+    )
     async def _initialize_agent(self):
-        """异步初始化 Agent（包括 MCP 工具）"""
-        if self._agent_initialized:
-            return
-
-        # 使用全局 MCP 客户端管理器（带重试拦截器）
-        mcp_client = await get_mcp_client_with_retry()
-
-        # 获取 MCP 工具
-        mcp_tools = await mcp_client.get_tools()
-        logger.info(f"成功加载 {len(mcp_tools)} 个 MCP 工具")
+        """按可用工具快照构建 Agent，不等待 MCP；更新工具时复用会话检查点。"""
+        version, mcp_tools = mcp_registry.snapshot()
+        if self.agent is not None and self._tools_version == version:
+            return self.agent
 
         # 将 MCP 工具添加到实例变量中
         self.mcp_tools = mcp_tools
@@ -130,15 +119,17 @@ class RagAgentService:
         self.agent = create_agent(
             self.model,
             tools=all_tools,
+            middleware=[RagContextDedupMiddleware()],
             checkpointer=self.checkpointer,
         )
 
-        self._agent_initialized = True
+        self._tools_version = version
 
 
         if all_tools:
             tool_names = [tool.name if hasattr(tool, "name") else str(tool) for tool in all_tools]
             logger.info(f"可用工具列表: {', '.join(tool_names)}")
+        return self.agent
 
     def _build_system_prompt(self) -> str:
         """
@@ -186,13 +177,13 @@ class RagAgentService:
             str: 完整答案
         """
         try:
-            await self._initialize_agent()
+            agent = await self._initialize_agent()
 
             logger.info(f"[会话 {session_id}] RAG Agent 收到查询（非流式）: {question}")
 
             # 构建消息列表（系统提示 + 用户问题）
             messages = [
-                SystemMessage(content=self.system_prompt),
+                SystemMessage(content=self.system_prompt + "\n\n" + mcp_registry.availability_message()),
                 HumanMessage(content=question)
             ]
 
@@ -201,12 +192,15 @@ class RagAgentService:
 
             # 配置 thread_id（用于会话持久化）
             config_dict = {
+                "run_name": "agent.chat",
+                "tags": ["oncall", "chat"],
+                "metadata": {"session_id": session_id, "thread_id": session_id},
                 "configurable": {
                     "thread_id": session_id
                 }
             }
 
-            result = await self.agent.ainvoke(
+            result = await agent.ainvoke(
                 input=agent_input,
                 config=config_dict,
             )
@@ -250,13 +244,13 @@ class RagAgentService:
                 - data: 具体内容
         """
         try:
-            await self._initialize_agent()
+            agent = await self._initialize_agent()
 
             logger.info(f"[会话 {session_id}] RAG Agent 收到查询（流式）: {question}")
 
             # 构建消息列表（系统提示 + 用户问题）
             messages = [
-                SystemMessage(content=self.system_prompt),
+                SystemMessage(content=self.system_prompt + "\n\n" + mcp_registry.availability_message()),
                 HumanMessage(content=question)
             ]
 
@@ -265,12 +259,15 @@ class RagAgentService:
 
             # 配置 thread_id（用于会话持久化）
             config_dict = {
+                "run_name": "agent.chat_stream",
+                "tags": ["oncall", "chat", "stream"],
+                "metadata": {"session_id": session_id, "thread_id": session_id},
                 "configurable": {
                     "thread_id": session_id
                 }
             }
 
-            async for token, metadata in self.agent.astream(
+            async for token, metadata in agent.astream(
                 input=agent_input,
                 config=config_dict,
                 stream_mode="messages",

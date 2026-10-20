@@ -9,7 +9,7 @@
 ## ✨ 核心特性
 
 - 🤖 **智能对话** - LangChain 多轮对话 + 流式输出
-- 📚 **RAG 问答** - 向量检索增强，支持文档上传、自动建立向量索引、自动更新知识库
+- 📚 **RAG 问答** - LangChain 父子召回，支持文档上传、父文档持久化和文件索引更新
 - 🔧 **AIOps 诊断** - Plan-Execute-Replan 自动故障诊断和根因分析
 - 🌐 **Web 界面** - 现代化 UI，支持多种对话模式：快速问答/流式对话
 - 🔌 **MCP 集成** - 日志查询和监控数据工具接入
@@ -17,7 +17,7 @@
 ## 🛠️ 技术栈
 
 - **框架**: FastAPI + LangChain + LangGraph
-- **LLM**: 阿里云 DashScope (通义千问)
+- **LLM**: 千问 AI 平台（OpenAI 兼容接口）
 - **向量库**: Milvus
 - **工具协议**: MCP (Model Context Protocol)
 
@@ -25,7 +25,7 @@
 
 ### 环境要求
 - Python 3.10+
-- 阿里云 DashScope API Key ([获取地址](https://dashscope.aliyun.com/))
+- 千问 AI 平台 API Key（在千问 AI 平台控制台创建）
 
 ### 安装和启动
 
@@ -47,7 +47,7 @@ uv pip install -e .
 pip install -e .
 
 # 3. 编辑配置文件
-# 首次使用需要编辑 .env 文件，填入你的 DASHSCOPE_API_KEY
+# 首次使用需要编辑 .env 文件，填入你的 QWEN_API_KEY
 vim .env  # 或使用其他编辑器
 
 # 4. 一键初始化（启动 Docker + 服务 + 上传文档）
@@ -82,7 +82,7 @@ python -m venv .venv
 pip install -e .
 
 # 3. 编辑配置文件
-# 使用记事本或其他编辑器打开 .env 文件，填入你的 DASHSCOPE_API_KEY
+# 使用记事本或其他编辑器打开 .env 文件，填入你的 QWEN_API_KEY
 notepad .env
 
 # 4. 启动 Docker Desktop
@@ -94,21 +94,11 @@ docker compose -f vector-database.yml up -d
 # 6. 等待 Milvus 启动完成（约 5-10 秒）
 timeout /t 10
 
-# 7. 启动 MCP 服务
-# 启动 CLS 日志查询服务（新开一个 PowerShell 窗口）
-python mcp_servers/cls_server.py
-
-# 启动 Monitor 监控服务（新开一个 PowerShell 窗口）
-python mcp_servers/monitor_server.py
-
-# 8. 启动 FastAPI 主服务（新开一个 PowerShell 窗口）
+# 7. 启动主服务；内置 MCP 在后台通过框架 stdio 自动管理，无需额外终端
 # 注意：日志会自动输出到 logs\app_YYYY-MM-DD.log
 python -m uvicorn app.main:app --host 0.0.0.0 --port 9900
 
-# 9. 上传文档到向量库（新开一个 PowerShell 窗口）
-# 等待服务启动完成后执行
-timeout /t 5
-python -c "import requests, os, time; [requests.post('http://localhost:9900/api/upload', files={'file': open(f'aiops-docs/{f}', 'rb')}) or time.sleep(1) for f in os.listdir('aiops-docs') if f.endswith('.md')]"
+# 8. 浏览器打开 http://localhost:9900，点击左侧“知识库”上传文档或重建目录索引
 ```
 
 **Windows 一键启动脚本**（推荐）
@@ -127,6 +117,28 @@ python -c "import requests, os, time; [requests.post('http://localhost:9900/api/
 - **Web 界面**: http://localhost:9900
 - **API 文档**: http://localhost:9900/docs
 
+页面左侧的 **知识库** 支持以下操作，无需通过 API 文档提交：
+
+- **上传文档**：选择 UTF-8 编码的 `.md` 或 `.txt` 文件，单个不超过 10 MB。
+  上传后自动加载、父子切分、向量化并保存，面板显示文件名和父文档数量。同名文件更新已有内容。
+- **重建目录索引**：默认 `data/corpus/processed`，也可填写 `uploads`、`aiops-docs`
+  或其他服务端目录；相对路径按从项目根目录启动服务解析。递归索引后显示总数、成功数、失败数、耗时和失败原因。
+  该操作更新目录中现存的文件，不清空整个知识库，也不移除已从磁盘删除的文件索引。
+
+任务执行期间禁止在本页重复提交，关闭面板不会取消任务，重新打开可查看结果；刷新或关闭浏览器
+会丢失本页结果，不能据此判断后台操作是否结束。索引成功后直接在聊天页面提问。
+输入框“更多选项 → 上传文件”也可打开同一上传流程。
+
+左侧 **MCP 工具状态** 显示 CLS、Monitor 的可用状态、已发现的工具名和失败原因，
+并提供“重新检测工具”。工具发现完全在后台执行；某个 MCP 不可用时只移除该服务的工具，
+知识库问答继续工作，恢复后后续请求自动使用恢复的工具，并保留原会话。
+
+`MCP_AUTO_START=true` 为默认值：内置本机 HTTP 地址会转为 LangChain MCP 的 stdio 配置，
+使用当前 Python 解释器自动启动本地脚本。主应用启动时建立每个服务的 MCP 会话并发现工具，
+后续工具调用复用会话；应用关闭时统一关闭会话并清理 stdio 子进程。故障服务会在后台重连，
+健康服务不会因定时检查而重复启动子进程；这不是常驻在 8003/8004 端口的 HTTP 服务。
+远程 HTTP MCP 地址保持原样。要连接独立部署的本机 HTTP 服务，设置 `MCP_AUTO_START=false`。
+
 ## 📡 API 接口
 
 ### 核心接口
@@ -137,7 +149,11 @@ python -c "import requests, os, time; [requests.post('http://localhost:9900/api/
 | 流式对话 | POST | `/api/chat_stream` | SSE 流式输出 |
 | AIOps 诊断 | POST | `/api/aiops` | 自动故障诊断（流式） |
 | 文件上传 | POST | `/api/upload` | 上传并索引文档 |
-| 健康检查 | GET | `/api/health` | 服务状态检查 |
+| 目录索引 | POST | `/api/index_directory` | 重建目录父子索引 |
+| 工具状态 | GET | `/api/tools/status` | 读取缓存的 MCP 工具状态 |
+| 工具检测 | POST | `/api/tools/refresh` | 提交后台重新检测，立即返回 202 |
+| 知识检索 | POST | `/api/knowledge/search` | 子文档匹配并返回父文档 |
+| 健康检查 | GET | `/health` | 服务状态检查 |
 
 ### 使用示例
 
@@ -181,8 +197,8 @@ super_biz_agent_py/
 │   │   ├── vector_store_manager.py         # 向量存储管理器
 │   │   ├── vector_embedding_service.py     # 向量embedding服务
 │   │   ├── vector_index_service.py         # 向量索引服务
-│   │   ├── vector_search_service.py        # 向量检索服务
-│   │   └── document_splitter_service.py    # 文档分割服务
+│   │   ├── document_loader_service.py      # 文档加载和来源 metadata
+│   │   └── parent_document_service.py      # 原生父子召回与文件索引版本管理
 │   ├── agent/                              # Agent 模块
 │   │   ├── __init__.py
 │   │   ├── mcp_client.py                   # MCP 客户端（工具调用）
@@ -236,14 +252,18 @@ super_biz_agent_py/
 
 ## ⚙️ 配置说明
 
+LangSmith 配置、启动顺序、索引重建和父子召回验收命令见
+[全链路追踪与验收](docs/observability.md)。配置模板见 [.env.example](.env.example)。
+
 通过 `.env` 文件配置：
 
 ```bash
-# 阿里云LLM DashScope 配置（必填）
-# 秘钥管理： https://bailian.console.aliyun.com/cn-beijing/?spm=5176.29597918.J_SEsSjsNv72yRuRFS2VknO.2.61ac133ccTVQLw&tab=demohouse#/api-key
-DASHSCOPE_API_KEY=your-api-key （配置你自己的秘钥）
-DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1  # 不配置则默认会使用新加坡站点
-DASHSCOPE_MODEL=qwen-max
+# 千问 AI 平台配置（必填）
+QWEN_API_KEY=your-api-key
+QWEN_API_BASE=https://maas.qianwenaiapi.com/compatible-mode/v1
+QWEN_CHAT_MODEL=qwen3.8-max
+QWEN_EMBEDDING_MODEL=qwen3.7-text-embedding-flash
+QWEN_EMBEDDING_DIMENSIONS=1024
 
 # Milvus 配置
 MILVUS_HOST=localhost
@@ -251,9 +271,30 @@ MILVUS_PORT=19530
 
 # RAG 配置
 RAG_TOP_K=3
-CHUNK_MAX_SIZE=800
-CHUNK_OVERLAP=100
+RAG_COLLECTION_NAME=oncall_knowledge_children
+RAG_STORAGE_PATH=data/knowledge
+RAG_PARENT_CHUNK_SIZE=1600
+RAG_CHILD_CHUNK_SIZE=400
+RAG_CHILD_CHUNK_OVERLAP=80
+RAG_STORAGE_TIMEOUT=120
+
+# LangSmith（启用时填写独立的 LangSmith 密钥）
+LANGSMITH_TRACING=false
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=OncallAgent
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 ```
+
+上传和目录索引由 `ParentDocumentRetriever.add_documents()` 完成父子切分、子向量入库及
+父文档存储。`retrieve_knowledge` 使用该 Retriever 回取父文档，统一供对话 Agent 和
+AIOps 使用；不再走单层向量检索。详细的数据更新机制及迁移步骤见
+[知识库说明](data/corpus/README.md)。旧单层 `biz` 集合不会自动转换或删除，需要从原文重建新索引。
+
+快速与流式聊天使用 LangChain 模型调用中间件，对同轮多次检索返回的父文档整理上下文：
+首次出现保留正文，后续重复命中改为资料编号引用，新资料继续追加。按用户消息划分轮次，
+不同问题不共享去重集合；原始工具结果、artifact 和检查点仍保留完整内容。
+LangSmith 的 `rag.deduplicate_context` 显示本轮去重统计，最内层聊天模型输入显示实际上下文。
+该处理兼容已有索引，无需重新向量化，详见[追踪与验证说明](docs/observability.md)。
 
 ## 🎯 AIOps 智能运维
 
@@ -352,8 +393,8 @@ taskkill /F /PID <PID>
 ### API Key 错误
 ```bash
 # 检查环境变量
-cat .env | grep DASHSCOPE_API_KEY    # Linux/macOS
-type .env | findstr DASHSCOPE_API_KEY  # Windows
+cat .env | grep QWEN_API_KEY    # Linux/macOS
+type .env | findstr QWEN_API_KEY  # Windows
 ```
 
 ### Milvus 连接失败
@@ -407,7 +448,7 @@ netstat -ano | findstr :8004  # Monitor MCP
 - [FastAPI 文档](https://fastapi.tiangolo.com/)
 - [LangChain 文档](https://python.langchain.com/)
 - [LangGraph Plan-Execute](https://langchain-ai.github.io/langgraph/tutorials/plan-and-execute/)
-- [阿里云 DashScope](https://dashscope.aliyun.com/)
+- [千问 AI 平台文档](https://platform.qianwenai.com/docs/)
 - [MCP 协议](https://modelcontextprotocol.io/)
 
 ## 📄 许可证

@@ -1,148 +1,100 @@
-"""向量存储管理器 - 封装 Milvus VectorStore 操作"""
+"""父子召回的子文档向量存储；集合结构由 LangChain Milvus 集成管理。"""
 
-from typing import List
+import asyncio
+from threading import RLock
 
-from langchain_core.documents import Document
 from langchain_milvus import Milvus
-from loguru import logger
+from pymilvus import AsyncMilvusClient
+from starlette.concurrency import run_in_threadpool
 
 from app.config import config
-from app.services.vector_embedding_service import vector_embedding_service
-
-
-# 统一使用 biz collection
-COLLECTION_NAME = "biz"
+from app.services.traced_stores import TracedMilvus
 
 
 class VectorStoreManager:
-    """向量存储管理器"""
-
-    def __init__(self):
-        """初始化向量存储管理器"""
-        self.vector_store = None
-        self.collection_name = COLLECTION_NAME
-        self._initialize_vector_store()
-
-    def _initialize_vector_store(self):
-        """初始化 Milvus VectorStore"""
-        try:
-            connection_args = {
-                "host": config.milvus_host,
-                "port": config.milvus_port,
-            }
-
-            # 创建 LangChain Milvus VectorStore
-            # 使用 biz collection，字段映射：text_field -> content, vector_field -> vector
-            self.vector_store = Milvus(
-                embedding_function=vector_embedding_service,
-                collection_name=self.collection_name,
-                connection_args=connection_args,
-                auto_id=False,  # 使用自定义 id
-                drop_old=False,
-                text_field="content",  # 文本内容存储到 content 字段
-                vector_field="vector",  # 向量存储到 vector 字段
-                primary_field="id",  # 主键字段
-                metadata_field="metadata",  # 元数据字段
-            )
-
-            logger.info(
-                f"VectorStore 初始化成功: {config.milvus_host}:{config.milvus_port}, "
-                f"collection: {self.collection_name}"
-            )
-
-        except Exception as e:
-            logger.error(f"VectorStore 初始化失败: {e}")
-            raise
-
-    def add_documents(self, documents: List[Document]) -> List[str]:
-        """
-        批量添加文档到向量存储（自动批量向量化）
-
-        Args:
-            documents: 文档列表
-
-        Returns:
-            List[str]: 文档 ID 列表
-        """
-        try:
-            import time
-            import uuid
-            start_time = time.time()
-            
-            # 为每个文档生成唯一 id（因为 auto_id=False）
-            ids = [str(uuid.uuid4()) for _ in documents]
-            
-            # LangChain Milvus 的 add_documents 会自动调用 embedding_function
-            # 并进行批量处理，性能更好
-            result_ids = self.vector_store.add_documents(documents, ids=ids)
-            
-            elapsed = time.time() - start_time
-            logger.info(
-                f"批量添加 {len(documents)} 个文档到 VectorStore 完成, "
-                f"耗时: {elapsed:.2f}秒, 平均: {elapsed/len(documents):.2f}秒/个"
-            )
-            return result_ids
-        except Exception as e:
-            logger.error(f"添加文档失败: {e}")
-            raise
-
-    def delete_by_source(self, file_path: str) -> int:
-        """
-        删除指定文件的所有文档
-
-        Args:
-            file_path: 文件路径
-
-        Returns:
-            int: 删除的文档数量
-        """
-        try:
-            # 使用 milvus_manager 获取已连接的 collection
-            from app.core.milvus_client import milvus_manager
-            collection = milvus_manager.get_collection()
-            
-            # metadata 是 JSON 字段，使用 JSON 路径查询语法
-            # _source 是文档的来源文件路径
-            expr = f'metadata["_source"] == "{file_path}"'
-            
-            result = collection.delete(expr)
-            deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
-            
-            logger.info(f"删除文件旧数据: {file_path}, 删除数量: {deleted_count}")
-            return deleted_count
-            
-        except Exception as e:
-            logger.warning(f"删除旧数据失败 (可能是首次索引): {e}")
-            return 0
+    def __init__(self) -> None:
+        self._vector_store: Milvus | None = None
+        self._async_client: AsyncMilvusClient | None = None
+        self._lock = RLock()
+        self._lifecycle_lock = asyncio.Lock()
 
     def get_vector_store(self) -> Milvus:
-        """
-        获取 VectorStore 实例
+        """请求线程只读取已初始化的存储，不在线程池中创建异步客户端。"""
+        with self._lock:
+            if self._vector_store is None:
+                raise RuntimeError("向量存储尚未初始化，应在应用启动时 await vector_store_manager.initialize()")
+            return self._vector_store
 
-        Returns:
-            Milvus: VectorStore 实例
-        """
-        return self.vector_store
+    async def initialize(self) -> Milvus:
+        """在应用运行中的事件循环内构造集成，完成同步和异步客户端初始化。"""
+        async with self._lifecycle_lock:
+            with self._lock:
+                if self._vector_store is not None:
+                    return self._vector_store
+            from app.services.vector_embedding_service import vector_embedding_service
 
-    def similarity_search(self, query: str, k: int = 3) -> List[Document]:
-        """
-        相似度搜索
+            store = None
+            async_client = None
+            try:
+                # 0.3.3 的同步构造函数也会创建 AsyncMilvusClient。
+                # 这一步必须在事件循环线程执行；同步业务操作仍在线程池中运行。
+                store = TracedMilvus(
+                    embedding_function=vector_embedding_service,
+                    collection_name=config.rag_collection_name,
+                    connection_args={
+                        "host": config.milvus_host,
+                        "port": config.milvus_port,
+                        "timeout": config.milvus_timeout / 1000,
+                    },
+                    auto_id=True,
+                    enable_dynamic_field=True,
+                    drop_old=False,
+                    consistency_level="Strong",
+                    text_field="content",
+                    vector_field="vector",
+                    # langchain-milvus 0.3.3 在首次建集合时会把构造级 timeout
+                    # 重复转发给 insert。保持其默认 None，操作超时由调用方传入。
+                )
+                async_client = store.aclient
+                if store.col is not None:
+                    fields = {field.name: field for field in store.col.schema.fields}
+                    vector = fields.get("vector")
+                    if vector is None or vector.params.get("dim") != config.qwen_embedding_dimensions:
+                        raise RuntimeError(
+                            "父子向量集合维度与当前 embedding 配置不一致，请配置新集合并重建索引"
+                        )
+                    if not store.col.schema.enable_dynamic_field:
+                        raise RuntimeError("父子召回需要支持动态 metadata 的独立集合，请配置新集合")
+            except BaseException as error:
+                if store is not None:
+                    try:
+                        await self._close_clients(store, async_client)
+                    except Exception as cleanup_error:
+                        error.add_note(f"初始化失败后的 Milvus 客户端清理也发生错误：{cleanup_error}")
+                raise
 
-        Args:
-            query: 查询文本
-            k: 返回结果数量
+            with self._lock:
+                self._vector_store = store
+                self._async_client = async_client
+            return store
 
-        Returns:
-            List[Document]: 相关文档列表
-        """
+    @staticmethod
+    async def _close_clients(store: Milvus, async_client: AsyncMilvusClient | None) -> None:
         try:
-            docs = self.vector_store.similarity_search(query, k=k)
-            logger.debug(f"相似度搜索完成: query='{query}', 结果数={len(docs)}")
-            return docs
-        except Exception as e:
-            logger.error(f"相似度搜索失败: {e}")
-            return []
+            if async_client is not None:
+                await async_client.close()
+        finally:
+            await run_in_threadpool(store.client.close)
+
+    async def close(self) -> None:
+        """在所属事件循环内关闭异步客户端，同步客户端在线程池关闭。"""
+        async with self._lifecycle_lock:
+            with self._lock:
+                store, async_client = self._vector_store, self._async_client
+                self._vector_store = None
+                self._async_client = None
+            if store is not None:
+                await self._close_clients(store, async_client)
 
 
-# 全局单例
 vector_store_manager = VectorStoreManager()

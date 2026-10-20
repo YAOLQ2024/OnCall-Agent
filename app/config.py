@@ -4,6 +4,10 @@
 """
 
 from typing import Dict, Any
+from pathlib import Path
+import sys
+from urllib.parse import urlsplit
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,10 +28,21 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 9900
 
-    # DashScope 配置
-    dashscope_api_key: str = ""  # 默认空字符串，实际使用需从环境变量加载
-    dashscope_model: str = "qwen-max"
-    dashscope_embedding_model: str = "text-embedding-v4"  # v4 支持多种维度（默认 1024）
+    # LangSmith 追踪配置。启动时导出给 LangChain/LangSmith SDK，不记录密钥。
+    langsmith_tracing: bool = False
+    langsmith_api_key: SecretStr = SecretStr("")
+    langsmith_project: str = "OncallAgent"
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_workspace_id: str = ""
+    langsmith_hide_inputs: bool = False
+    langsmith_hide_outputs: bool = False
+
+    # 千问平台 OpenAI 兼容接口配置
+    qwen_api_key: str = ""
+    qwen_api_base: str = "https://maas.qianwenaiapi.com/compatible-mode/v1"
+    qwen_chat_model: str = "qwen3.8-max"
+    qwen_embedding_model: str = "qwen3.7-text-embedding-flash"
+    qwen_embedding_dimensions: int = 1024
 
     # Milvus 配置
     milvus_host: str = "localhost"
@@ -35,14 +50,29 @@ class Settings(BaseSettings):
     milvus_timeout: int = 10000  # 毫秒
 
     # RAG 配置
-    rag_top_k: int = 3
-    rag_model: str = "qwen-max"  # 使用快速响应模型，不带扩展思考
+    rag_top_k: int = Field(default=3, gt=0)
+    rag_collection_name: str = Field(
+        default="oncall_knowledge_children", pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+    )
+    rag_storage_path: str = Field(default="data/knowledge", min_length=1)
+    rag_parent_chunk_size: int = Field(default=1600, gt=0)
+    rag_child_chunk_size: int = Field(default=400, gt=0)
+    rag_child_chunk_overlap: int = Field(default=80, ge=0)
+    rag_storage_timeout: int = Field(default=120, gt=0)
 
-    # 文档分块配置
-    chunk_max_size: int = 800
-    chunk_overlap: int = 100
+    @model_validator(mode="after")
+    def validate_rag_chunks(self) -> "Settings":
+        if not self.rag_child_chunk_size < self.rag_parent_chunk_size:
+            raise ValueError("RAG_CHILD_CHUNK_SIZE 必须小于 RAG_PARENT_CHUNK_SIZE")
+        if not self.rag_child_chunk_overlap < self.rag_child_chunk_size:
+            raise ValueError("RAG_CHILD_CHUNK_OVERLAP 必须小于 RAG_CHILD_CHUNK_SIZE")
+        return self
 
     # MCP 服务配置
+    mcp_auto_start: bool = True
+    mcp_discovery_timeout: float = Field(default=10, gt=0)
+    mcp_tool_timeout: float = Field(default=30, gt=0)
+    mcp_refresh_interval: float = Field(default=30, gt=0)
     mcp_cls_transport: str = "streamable-http"
     mcp_cls_url: str = "http://localhost:8003/mcp"
     mcp_monitor_transport: str = "streamable-http"
@@ -51,7 +81,7 @@ class Settings(BaseSettings):
     @property
     def mcp_servers(self) -> Dict[str, Dict[str, Any]]:
         """获取完整的 MCP 服务器配置"""
-        return {
+        servers = {
             "cls": {
                 "transport": self.mcp_cls_transport,
                 "url": self.mcp_cls_url,
@@ -61,6 +91,28 @@ class Settings(BaseSettings):
                 "url": self.mcp_monitor_url,
             }
         }
+        root = Path(__file__).resolve().parents[1]
+        for name, connection in servers.items():
+            try:
+                url = urlsplit(connection["url"])
+                local_builtin = (
+                    url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}
+                    and url.port == {"cls": 8003, "monitor": 8004}[name]
+                    and url.path.rstrip("/") == "/mcp"
+                    and not url.username and not url.password and not url.query and not url.fragment
+                )
+            except ValueError:
+                # MCP 地址错误交给后台发现报告，不阻止主应用和知识库启动。
+                local_builtin = False
+            if connection["transport"] == "stdio" or (
+                self.mcp_auto_start and connection["transport"] == "streamable-http" and local_builtin
+            ):
+                servers[name] = {
+                    "transport": "stdio", "command": sys.executable,
+                    "args": ["-u", str(root / "mcp_servers" / f"{name}_server.py"), "--stdio"],
+                    "cwd": str(root), "encoding": "utf-8",
+                }
+        return servers
 
 
 # 全局配置实例

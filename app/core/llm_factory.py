@@ -1,14 +1,4 @@
-"""LLM 工厂类
-
-使用 LangChain ChatOpenAI 通过 OpenAI 兼容模式调用阿里云 DashScope
-这种方式便于后续切换到其他支持 OpenAI API 的模型提供商
-
-支持的模型提供商（只需修改 base_url 和 api_key）：
-- 阿里云 DashScope: https://dashscope.aliyuncs.com/compatible-mode/v1
-- OpenAI: https://api.openai.com/v1
-- Azure OpenAI: https://{resource}.openai.azure.com
-- 其他兼容 OpenAI API 的服务
-"""
+"""通过千问平台的 OpenAI 兼容接口创建聊天模型。"""
 
 from langchain_openai import ChatOpenAI
 from app.config import config
@@ -16,10 +6,7 @@ from loguru import logger
 
 
 class LLMFactory:
-    """LLM 工厂类 - 使用 OpenAI 兼容模式"""
-
-    # 阿里云 DashScope OpenAI 兼容模式 URL
-    DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    """千问聊天模型工厂。"""
 
     @staticmethod
     def create_chat_model(
@@ -29,13 +16,11 @@ class LLMFactory:
         base_url: str | None = None,
         api_key: str | None = None,
     ) -> ChatOpenAI:
-        model = model or config.dashscope_model
-        base_url = base_url or LLMFactory.DASHSCOPE_BASE_URL
-        api_key = api_key or config.dashscope_api_key
-
-        # 参考：https://help.aliyun.com/zh/model-studio/getting-started/models
-        extra_body = {}
-        extra_body["stream"] = streaming
+        model = model or config.qwen_chat_model
+        base_url = base_url or config.qwen_api_base
+        api_key = api_key or config.qwen_api_key
+        if not api_key:
+            raise ValueError("请在项目 .env 中配置 QWEN_API_KEY")
 
         llm = ChatOpenAI(
             model=model,
@@ -43,7 +28,6 @@ class LLMFactory:
             streaming=streaming,
             base_url=base_url,
             api_key=api_key,
-            extra_body=extra_body if extra_body else None,
         )
 
         return llm
