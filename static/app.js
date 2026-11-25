@@ -1,21 +1,39 @@
 // OnCall Aegnt 前端应用
+const EXECUTION_EVENT_TYPES = new Set(['route', 'aiops_progress', 'tool_call', 'search_results', 'compaction', 'debug']);
+
 class OnCallAegntApp {
     constructor() {
         this.apiBaseUrl = '/api';
         this.isKnowledgeBusy = false;
-        this.currentMode = 'quick'; // 'quick' 或 'stream'
+        this.currentMode = 'stream'; // 默认开启流式推演模式，实时展示路由与思考轨迹
         this.sessionId = this.generateSessionId();
         this.isStreaming = false;
         this.currentChatHistory = []; // 当前对话的消息历史
-        this.chatHistories = this.loadChatHistories(); // 所有历史对话
+        this.chatHistories = []; // 所有历史对话
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
-        
+        this.accessToken = localStorage.getItem('oncall_access_token') || '';
+        this.currentUser = null;
+        this.memoryProfile = null;
+        this.memoryProfileRequest = 0;
+        this.memoryProfileBusy = false;
+        this.memoryProfileConflict = false;
+        this.authVersion = 0;
+        this.authBusy = false;
+        this.pendingAuthRequests = new Set();
+        window.addEventListener('storage', (event) => {
+            if (event.key !== 'oncall_access_token') return;
+            this.clearAuthState();
+            this.accessToken = event.newValue || '';
+            if (this.accessToken) this.initAuth();
+            else this.showLoginOverlay();
+        });
+
         this.initializeElements();
         this.bindEvents();
         this.updateUI();
         this.initMarkdown();
         this.checkAndSetCentered();
-        this.renderChatHistory();
+        this.initAuth();
         this.loadToolStatus();
         this.toolStatusTimer = setInterval(() => {
             if (!document.hidden) this.loadToolStatus();
@@ -69,13 +87,13 @@ class OnCallAegntApp {
     // 安全地渲染 Markdown
     renderMarkdown(content) {
         if (!content) return '';
-        
+
         // 检查 marked 是否可用
         if (typeof marked === 'undefined') {
             console.warn('marked 库未加载，使用纯文本显示');
             return this.escapeHtml(content);
         }
-        
+
         try {
             const html = marked.parse(content);
             return html;
@@ -105,8 +123,7 @@ class OnCallAegntApp {
         // 侧边栏元素
         this.sidebar = document.querySelector('.sidebar');
         this.newChatBtn = document.getElementById('newChatBtn');
-        this.aiOpsSidebarBtn = document.getElementById('aiOpsSidebarBtn');
-        
+
         // 输入区域元素
         this.messageInput = document.getElementById('messageInput');
         this.sendButton = document.getElementById('sendButton');
@@ -132,30 +149,101 @@ class OnCallAegntApp {
         this.toolStatusList = document.getElementById('toolStatusList');
         this.refreshToolsBtn = document.getElementById('refreshToolsBtn');
         this.toolStatusNotice = document.getElementById('toolStatusNotice');
-        
+
         // 聊天区域元素
         this.chatMessages = document.getElementById('chatMessages');
         this.loadingOverlay = document.getElementById('loadingOverlay');
         this.chatContainer = document.querySelector('.chat-container');
         this.welcomeGreeting = document.getElementById('welcomeGreeting');
         this.chatHistoryList = document.getElementById('chatHistoryList');
-        
+
+        // 登录与用户元素
+        this.loginOverlay = document.getElementById('loginOverlay');
+        this.loginForm = document.getElementById('loginForm');
+        this.loginUsername = document.getElementById('loginUsername');
+        this.loginPassword = document.getElementById('loginPassword');
+        this.loginError = document.getElementById('loginError');
+        this.loginSubmitBtn = document.getElementById('loginSubmitBtn');
+        this.logoutBtn = document.getElementById('logoutBtn');
+        this.quickRoleCards = document.querySelectorAll('.quick-role-card');
+        this.memoryBtn = document.getElementById('memoryBtn');
+        this.memoryDialog = document.getElementById('memoryDialog');
+        if (typeof IncidentMemoryView !== 'undefined') this.incidentMemory = new IncidentMemoryView(this);
+        this.closeMemoryBtn = document.getElementById('closeMemoryBtn');
+        this.memoryProfileForm = document.getElementById('memoryProfileForm');
+        this.memoryProfileFields = document.getElementById('memoryProfileFields');
+        this.memoryProfileOwner = document.getElementById('memoryProfileOwner');
+        this.memorySaveBtn = document.getElementById('memorySaveBtn');
+        this.memoryClearBtn = document.getElementById('memoryClearBtn');
+        this.memoryReloadBtn = document.getElementById('memoryReloadBtn');
+        this.memoryProfileStatus = document.getElementById('memoryProfileStatus');
+        this.memoryProfileStatusText = document.getElementById('memoryProfileStatusText');
+        this.memoryUseEnabled = document.getElementById('memoryUseEnabled');
+        this.memoryAutoExtract = document.getElementById('memoryAutoExtract');
+        this.memoryAutoHelp = document.getElementById('memoryAutoHelp');
+        if (typeof MemoryJobsView !== 'undefined') this.memoryJobs = new MemoryJobsView(this);
+        this.memoryProfileInputs = Object.fromEntries(Object.entries({
+            preferred_language: 'memoryLanguage', answer_detail: 'memoryDetail',
+            preferred_output_order: 'memoryOutputOrder', default_cluster: 'memoryCluster',
+            default_environment: 'memoryEnvironment', default_namespace: 'memoryNamespace',
+            responsible_services: 'memoryServices', response_preferences: 'memoryResponsePreferences',
+        }).map(([field, id]) => [field, document.getElementById(id)]));
+
         // 初始化时检查是否需要居中
         this.checkAndSetCentered();
     }
 
     // 绑定事件监听器
     bindEvents() {
+        this.bindMemoryProfileEvents();
+        // 登录表单提交
+        if (this.loginForm) {
+            this.loginForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                const username = this.loginUsername ? this.loginUsername.value.trim() : '';
+                const password = this.loginPassword ? this.loginPassword.value : '';
+                this.handleLoginSubmit(username, password);
+            });
+        }
+
+        // 快捷演示身份卡片点击登录
+        if (this.quickRoleCards && this.quickRoleCards.length > 0) {
+            this.quickRoleCards.forEach(card => {
+                card.addEventListener('click', () => {
+                    this.quickRoleCards.forEach(c => c.classList.remove('active'));
+                    card.classList.add('active');
+                    const username = card.dataset.username || 'alice';
+                    const password = card.dataset.password || '123456';
+                    if (this.loginUsername) this.loginUsername.value = username;
+                    if (this.loginPassword) this.loginPassword.value = password;
+                    this.handleLoginSubmit(username, password);
+                });
+            });
+        }
+
+        // 退出登录按钮
+        if (this.logoutBtn) {
+            this.logoutBtn.addEventListener('click', () => this.logout());
+        }
+
+        // 首屏排障场景快捷卡片一键提问
+        const scenarioCards = document.querySelectorAll('.scenario-card[data-prompt]');
+        scenarioCards.forEach(card => {
+            card.addEventListener('click', () => {
+                if (this.isStreaming) return;
+                const prompt = card.dataset.prompt;
+                if (prompt && this.messageInput) {
+                    this.messageInput.value = prompt;
+                    this.sendMessage();
+                }
+            });
+        });
+
         // 新建对话
         if (this.newChatBtn) {
             this.newChatBtn.addEventListener('click', () => this.newChat());
         }
-        
-        // AI Ops按钮
-        if (this.aiOpsSidebarBtn) {
-            this.aiOpsSidebarBtn.addEventListener('click', () => this.triggerAIOps());
-        }
-        
+
         // 模式选择下拉菜单
         if (this.modeSelectorBtn) {
             this.modeSelectorBtn.addEventListener('click', (e) => {
@@ -163,7 +251,7 @@ class OnCallAegntApp {
                 this.toggleModeDropdown();
             });
         }
-        
+
         // 下拉菜单项点击
         const dropdownItems = document.querySelectorAll('.dropdown-item');
         dropdownItems.forEach(item => {
@@ -173,29 +261,29 @@ class OnCallAegntApp {
                 this.closeModeDropdown();
             });
         });
-        
+
         // 点击外部关闭下拉菜单
         document.addEventListener('click', (e) => {
-            if (!this.modeSelectorBtn.contains(e.target) && 
+            if (!this.modeSelectorBtn.contains(e.target) &&
                 !this.modeDropdown.contains(e.target)) {
                 this.closeModeDropdown();
             }
         });
-        
+
         // 发送消息
         if (this.sendButton) {
             this.sendButton.addEventListener('click', () => this.sendMessage());
         }
-        
+
         if (this.messageInput) {
-            this.messageInput.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
+            this.messageInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
                     e.preventDefault();
                     this.sendMessage();
                 }
             });
         }
-        
+
         // 工具按钮和菜单
         if (this.toolsBtn) {
             this.toolsBtn.addEventListener('click', (e) => {
@@ -203,7 +291,7 @@ class OnCallAegntApp {
                 this.toggleToolsMenu();
             });
         }
-        
+
         // 工具菜单项点击事件
         if (this.uploadFileItem) {
             this.uploadFileItem.addEventListener('click', () => {
@@ -212,16 +300,16 @@ class OnCallAegntApp {
                 this.closeToolsMenu();
             });
         }
-        
+
         // 点击外部关闭工具菜单
         document.addEventListener('click', (e) => {
-            if (this.toolsBtn && this.toolsMenu && 
-                !this.toolsBtn.contains(e.target) && 
+            if (this.toolsBtn && this.toolsMenu &&
+                !this.toolsBtn.contains(e.target) &&
                 !this.toolsMenu.contains(e.target)) {
                 this.closeToolsMenu();
             }
         });
-        
+
         if (this.fileInput) {
             this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
         }
@@ -238,10 +326,11 @@ class OnCallAegntApp {
     }
 
     async loadToolStatus() {
+        if (!this.currentUser) return;
         if (this.isLoadingToolStatus) return;
         this.isLoadingToolStatus = true;
         try {
-            const response = await fetch(`${this.apiBaseUrl}/tools/status`, {
+            const response = await this.authFetch(`${this.apiBaseUrl}/tools/status`, {
                 cache: 'no-store', signal: AbortSignal.timeout(5000)
             });
             const payload = await response.json();
@@ -301,7 +390,7 @@ class OnCallAegntApp {
     async refreshTools() {
         this.refreshToolsBtn.disabled = true;
         try {
-            const response = await fetch(`${this.apiBaseUrl}/tools/refresh`, {
+            const response = await this.authFetch(`${this.apiBaseUrl}/tools/refresh`, {
                 method: 'POST', signal: AbortSignal.timeout(5000)
             });
             if (response.status !== 202) throw new Error('提交工具检测失败');
@@ -340,7 +429,7 @@ class OnCallAegntApp {
             this.showNotification('请等待当前对话完成后再新建对话', 'warning');
             return;
         }
-        
+
         // 如果当前有对话内容，且不是从历史记录加载的，才保存为新的历史对话
         // 如果是从历史记录加载的，只需要更新该历史记录
         if (this.currentChatHistory.length > 0) {
@@ -352,51 +441,50 @@ class OnCallAegntApp {
                 this.saveCurrentChat();
             }
         }
-        
+
         // 停止所有进行中的操作
         this.isStreaming = false;
-        
+
         // 清空输入框
         if (this.messageInput) {
             this.messageInput.value = '';
         }
-        
+
         // 清空当前对话历史
         this.currentChatHistory = [];
-        
+
         // 重置标记
         this.isCurrentChatFromHistory = false;
-        
+
         // 清空聊天记录
         if (this.chatMessages) {
             this.chatMessages.innerHTML = '';
         }
-        
+
         // 生成新的会话ID
         this.sessionId = this.generateSessionId();
-        
-        // 重置模式为快速
-        this.currentMode = 'quick';
+
+        // 保持当前所选执行引擎模式并刷新UI
         this.updateUI();
-        
+
         // 重新设置居中样式（确保对话框居中显示）
         this.checkAndSetCentered();
-        
+
         // 确保容器有过渡动画
         if (this.chatContainer) {
             this.chatContainer.style.transition = 'all 0.5s ease';
         }
-        
+
         // 更新历史对话列表
         this.renderChatHistory();
     }
-    
+
     // 保存当前对话到历史记录（新建）
     saveCurrentChat() {
         if (this.currentChatHistory.length === 0) {
             return;
         }
-        
+
         // 检查是否已存在相同ID的历史记录
         const existingIndex = this.chatHistories.findIndex(h => h.id === this.sessionId);
         if (existingIndex !== -1) {
@@ -404,13 +492,13 @@ class OnCallAegntApp {
             this.updateCurrentChatHistory();
             return;
         }
-        
+
         // 获取对话标题（使用第一条用户消息的前30个字符）
         const firstUserMessage = this.currentChatHistory.find(msg => msg.type === 'user');
-        const title = firstUserMessage ? 
-            (firstUserMessage.content.substring(0, 30) + (firstUserMessage.content.length > 30 ? '...' : '')) : 
+        const title = firstUserMessage ?
+            (firstUserMessage.content.substring(0, 30) + (firstUserMessage.content.length > 30 ? '...' : '')) :
             '新对话';
-        
+
         const chatHistory = {
             id: this.sessionId,
             title: title,
@@ -418,37 +506,37 @@ class OnCallAegntApp {
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
-        
+
         // 添加到历史记录列表的开头
         this.chatHistories.unshift(chatHistory);
-        
+
         // 限制历史记录数量（最多保存50条）
         if (this.chatHistories.length > 50) {
             this.chatHistories = this.chatHistories.slice(0, 50);
         }
-        
+
         // 保存到localStorage
         this.saveChatHistories();
     }
-    
+
     // 更新当前对话的历史记录
     updateCurrentChatHistory() {
         if (this.currentChatHistory.length === 0) {
             return;
         }
-        
+
         const existingIndex = this.chatHistories.findIndex(h => h.id === this.sessionId);
         if (existingIndex === -1) {
             // 如果不存在，调用保存方法
             this.saveCurrentChat();
             return;
         }
-        
+
         // 更新现有的历史记录
         const history = this.chatHistories[existingIndex];
         history.messages = [...this.currentChatHistory];
         history.updatedAt = new Date().toISOString();
-        
+
         // 如果标题需要更新（第一条消息改变了）
         const firstUserMessage = this.currentChatHistory.find(msg => msg.type === 'user');
         if (firstUserMessage) {
@@ -457,200 +545,526 @@ class OnCallAegntApp {
                 history.title = newTitle;
             }
         }
-        
+
         // 保存到localStorage
         this.saveChatHistories();
     }
-    
-    // 加载历史对话列表
-    loadChatHistories() {
+
+    bindMemoryProfileEvents() {
+        this.memoryBtn?.addEventListener('click', () => this.openMemoryDialog());
+        this.closeMemoryBtn?.addEventListener('click', () => this.memoryDialog.close());
+        this.memoryDialog?.addEventListener('close', () => {
+            if (!this.memoryDialog.open) this.resetMemoryProfileView();
+        });
+        this.memoryProfileForm?.addEventListener('submit', event => {
+            event.preventDefault();
+            this.saveMemoryProfile();
+        });
+        this.memoryReloadBtn?.addEventListener('click', () => this.loadMemoryProfile());
+        this.memoryClearBtn?.addEventListener('click', () => {
+            if (this.memoryProfileBusy || !this.memoryProfile) return;
+            for (const input of Object.values(this.memoryProfileInputs)) input.value = '';
+            this.setMemoryProfileStatus('warning', '字段已清空，点击保存后才会生效。');
+        });
+    }
+
+    resetMemoryProfileView() {
+        this.incidentMemory?.reset();
+        this.memoryJobs?.reset();
+        this.invalidateMemoryProfile();
+        if (this.memoryDialog?.open) this.memoryDialog.close();
+        if (this.memoryProfileStatusText) this.memoryProfileStatusText.textContent = '尚未加载画像。';
+        if (this.memoryProfileStatus) delete this.memoryProfileStatus.dataset.state;
+    }
+
+    invalidateMemoryProfile() {
+        this.memoryProfileRequest = (this.memoryProfileRequest || 0) + 1;
+        this.memoryProfileController?.abort();
+        this.memoryProfileController = null;
+        this.memoryProfile = null;
+        this.memoryProfileConflict = false;
+        this.memoryProfileForm?.reset();
+        if (this.memoryProfileOwner) this.memoryProfileOwner.textContent = '';
+        this.setMemoryProfileBusy(false);
+    }
+
+    setMemoryProfileBusy(busy) {
+        this.memoryProfileBusy = busy;
+        if (this.memoryProfileFields) this.memoryProfileFields.disabled = busy || !this.memoryProfile;
+        if (this.memorySaveBtn) this.memorySaveBtn.disabled = busy || !this.memoryProfile || this.memoryProfileConflict;
+        if (this.memoryClearBtn) this.memoryClearBtn.disabled = busy || !this.memoryProfile;
+        if (this.memoryReloadBtn) this.memoryReloadBtn.disabled = busy;
+    }
+
+    setMemoryProfileStatus(state, message) {
+        if (this.memoryProfileStatus) this.memoryProfileStatus.dataset.state = state;
+        if (this.memoryProfileStatusText) this.memoryProfileStatusText.textContent = message;
+    }
+
+    async openMemoryDialog() {
+        if (!this.currentUser) {
+            this.showLoginOverlay();
+            return;
+        }
+        if (!this.memoryDialog.open) {
+            // A close event can still be queued when the dialog is opened again.
+            this.resetMemoryProfileView();
+            this.memoryDialog.showModal();
+        }
+        await this.loadMemoryProfile();
+    }
+
+    applyMemoryProfile(data) {
+        if (!data || !Number.isInteger(data.revision) || data.revision < 0 || !data.profile) {
+            throw new Error('画像数据无效，请重试');
+        }
+        this.memoryProfile = data;
+        this.memoryProfileConflict = false;
+        for (const [field, input] of Object.entries(this.memoryProfileInputs)) {
+            const value = data.profile[field];
+            input.value = Array.isArray(value) ? value.join(field === 'response_preferences' ? '\n' : ', ') : (value || '');
+        }
+        this.memoryUseEnabled.checked = data.use_enabled;
+        if (this.memoryAutoExtract) this.memoryAutoExtract.checked = data.auto_extract_enabled;
+        if (this.memoryAutoHelp) this.memoryAutoHelp.textContent = data.automatic_available
+            ? '对话结束后，符合条件的内容会生成待审核建议。'
+            : '服务端自动提取开关或额度尚未开启。';
+        this.memoryProfileOwner.textContent = `${this.currentUser.display_name || this.currentUser.username || ''} · 版本 ${data.revision}`;
+    }
+
+    memoryRequestIsCurrent(request, version) {
+        return request === this.memoryProfileRequest && version === this.authVersion && this.memoryDialog?.open;
+    }
+
+    async loadMemoryProfile() {
+        if (!this.currentUser || !this.memoryDialog?.open || this.memoryProfileBusy) return;
+        const request = ++this.memoryProfileRequest;
+        const version = this.authVersion;
+        this.memoryProfileController = new AbortController();
+        this.setMemoryProfileBusy(true);
+        this.setMemoryProfileStatus('running', '正在加载当前账号的画像…');
         try {
-            const stored = localStorage.getItem('chatHistories');
-            return stored ? JSON.parse(stored) : [];
-        } catch (e) {
-            console.error('加载历史对话失败:', e);
-            return [];
+            const response = await this.authFetch('/api/memory/profile', {signal: this.memoryProfileController.signal});
+            if (!this.memoryRequestIsCurrent(request, version)) return;
+            if (!response.ok) throw new Error('画像加载失败，请重新加载');
+            const result = await response.json();
+            if (!this.memoryRequestIsCurrent(request, version)) return;
+            this.applyMemoryProfile(result.data);
+            this.setMemoryProfileStatus('success', result.data.runtime_connected
+                ? '已加载。开启使用后，下一轮聊天会参考已保存的偏好。'
+                : '已加载。服务端记忆开关关闭，画像尚未用于生成回复。');
+        } catch (error) {
+            if (this.memoryRequestIsCurrent(request, version)) this.setMemoryProfileStatus('error', error.message);
+        } finally {
+            if (this.memoryRequestIsCurrent(request, version)) this.setMemoryProfileBusy(false);
         }
     }
-    
-    // 保存历史对话列表到localStorage
+
+    async saveMemoryProfile() {
+        if (!this.currentUser || !this.memoryProfile || this.memoryProfileBusy || this.memoryProfileConflict || !this.memoryDialog?.open) return;
+        const request = ++this.memoryProfileRequest;
+        const version = this.authVersion;
+        const changes = {};
+        for (const [field, input] of Object.entries(this.memoryProfileInputs)) {
+            const separator = field === 'response_preferences' ? /\r?\n/ : field === 'responsible_services' ? /[,，\n]+/ : null;
+            const value = separator
+                ? [...new Set(input.value.split(separator).map(item => item.trim()).filter(Boolean))]
+                : (input.value.trim() || null);
+            const original = this.memoryProfile.profile[field] ?? (separator ? [] : null);
+            if (JSON.stringify(value) !== JSON.stringify(original)) changes[field] = value;
+        }
+        const patch = {expected_revision: this.memoryProfile.revision, changes};
+        if (this.memoryUseEnabled.checked !== this.memoryProfile.use_enabled) patch.use_enabled = this.memoryUseEnabled.checked;
+        if (this.memoryAutoExtract && this.memoryAutoExtract.checked !== this.memoryProfile.auto_extract_enabled) {
+            patch.auto_extract_enabled = this.memoryAutoExtract.checked;
+        }
+        this.memoryProfileController = new AbortController();
+        this.setMemoryProfileBusy(true);
+        this.setMemoryProfileStatus('running', '正在保存画像…');
+        try {
+            const response = await this.authFetch('/api/memory/profile', {
+                method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(patch), signal: this.memoryProfileController.signal,
+            });
+            if (!this.memoryRequestIsCurrent(request, version)) return;
+            if (response.status === 409) {
+                this.memoryProfileConflict = true;
+                this.setMemoryProfileStatus('warning', '画像已在其他页面修改。本次输入仍保留；请先确认输入，再点击重新加载后编辑，避免覆盖新版本。');
+                return;
+            }
+            const result = await response.json();
+            if (!this.memoryRequestIsCurrent(request, version)) return;
+            if (!response.ok) {
+                const detail = result.detail;
+                const labels = {
+                    preferred_language: '语言代码', answer_detail: '回答详细程度',
+                    preferred_output_order: '输出顺序', default_cluster: '默认集群',
+                    default_environment: '默认环境', default_namespace: '默认命名空间',
+                    responsible_services: '负责的服务', response_preferences: '自然语言回答偏好',
+                };
+                const fields = Array.isArray(detail) ? [...new Set(detail.map(item => labels[item.loc?.[2]] || '画像字段'))] : [];
+                const message = fields.length ? `请检查${fields.join('、')}，格式或长度不符合要求。` : detail;
+                throw new Error(typeof message === 'string' ? message : '保存失败，请重试');
+            }
+            this.applyMemoryProfile(result.data);
+            this.setMemoryProfileStatus('success', result.data.runtime_connected
+                ? '画像已保存。变更会在下一轮生效，环境设置只用于提示核实目标。'
+                : '画像已保存。服务端记忆开关关闭。');
+        } catch (error) {
+            if (this.memoryRequestIsCurrent(request, version)) this.setMemoryProfileStatus('error', error.message);
+        } finally {
+            if (this.memoryRequestIsCurrent(request, version)) this.setMemoryProfileBusy(false);
+        }
+    }
+
+    // 构建携带 Bearer Token 的请求头
+    authHeaders(extraHeaders = {}) {
+        const headers = new Headers(extraHeaders);
+        if (this.accessToken) headers.set('Authorization', `Bearer ${this.accessToken}`);
+        return headers;
+    }
+
+    async authFetch(url, options = {}) {
+        const version = this.authVersion;
+        const controller = new AbortController();
+        this.pendingAuthRequests.add(controller);
+        const onAbort = () => controller.abort();
+        options.signal?.addEventListener('abort', onAbort, {once: true});
+        if (options.signal?.aborted) controller.abort();
+        const cleanup = () => {
+            this.pendingAuthRequests.delete(controller);
+            options.signal?.removeEventListener('abort', onAbort);
+        };
+        const checkCurrent = () => {
+            if (version !== this.authVersion) throw new Error('登录身份已变化，已忽略旧请求');
+        };
+        try {
+            const response = await fetch(url, {...options, headers: this.authHeaders(options.headers), signal: controller.signal});
+            checkCurrent();
+            if (response.status === 401) {
+                cleanup();
+                this.handleUnauthorized();
+                return response;
+            }
+            const originalJson = response.json.bind(response);
+            response.json = async () => {
+                const data = await originalJson();
+                checkCurrent();
+                return data;
+            };
+            if (response.headers?.get('content-type')?.includes('text/event-stream') && response.body) {
+                const getReader = response.body.getReader.bind(response.body);
+                response.body.getReader = (...args) => {
+                    const reader = getReader(...args);
+                    return {
+                        read: async () => {
+                            checkCurrent();
+                            const result = await reader.read();
+                            checkCurrent();
+                            if (result.done) cleanup();
+                            return result;
+                        },
+                        cancel: async reason => {try {await reader.cancel(reason);} finally {cleanup();}},
+                        releaseLock: () => {try {reader.releaseLock();} finally {cleanup();}},
+                    };
+                };
+            } else cleanup();
+            return response;
+        } catch (error) {
+            cleanup();
+            throw error;
+        }
+    }
+
+    clearAuthState() {
+        this.authVersion++;
+        for (const controller of this.pendingAuthRequests) controller.abort();
+        this.pendingAuthRequests.clear();
+        this.accessToken = '';
+        this.currentUser = null;
+        this.resetMemoryProfileView();
+        this.currentChatHistory = [];
+        this.chatHistories = [];
+        this.isCurrentChatFromHistory = false;
+        if (this.chatMessages) this.chatMessages.innerHTML = '';
+        if (this.loginPassword) this.loginPassword.value = '';
+        if (this.knowledgeDialog?.open) this.knowledgeDialog.close();
+        if (this.knowledgeResultDetails) this.knowledgeResultDetails.textContent = '';
+        this.sessionId = this.generateSessionId();
+        this.renderChatHistory();
+        this.checkAndSetCentered();
+    }
+
+    handleUnauthorized() {
+        this.clearAuthState();
+        localStorage.removeItem('oncall_access_token');
+        this.showLoginOverlay();
+    }
+
+    showLoginOverlay() {
+        if (this.loginOverlay) {
+            this.loginOverlay.classList.remove('hidden');
+        }
+        if (this.loginError) {
+            this.loginError.hidden = true;
+            this.loginError.textContent = '';
+        }
+    }
+
+    hideLoginOverlay() {
+        if (this.loginOverlay) {
+            this.loginOverlay.classList.add('hidden');
+        }
+    }
+
+    applyUserProfile(user) {
+        if (!user) return;
+        this.currentUser = user;
+        const avatarEl = document.getElementById('userAvatar');
+        const nameEl = document.getElementById('userName');
+        const badgeEl = document.getElementById('userRoleBadge');
+        const deptEl = document.getElementById('userDept');
+        if (avatarEl) avatarEl.textContent = user.avatar || '👩‍💻';
+        if (nameEl) nameEl.textContent = (user.display_name || user.username || '').split('(')[0].trim();
+        if (badgeEl) badgeEl.textContent = (user.role || 'sre').toUpperCase();
+        if (deptEl) deptEl.textContent = user.department || '基础设施与稳定性运维部';
+    }
+
+    // 初始化登录态检查（前端路由守卫）
+    async initAuth() {
+        const version = this.authVersion;
+        try {
+            // HttpOnly Cookie can restore login even if localStorage was cleared.
+            const resp = await this.authFetch('/api/auth/me');
+            if (!resp.ok) {
+                if (resp.status !== 401) this.handleUnauthorized();
+                return;
+            }
+            const res = await resp.json();
+            if (res.data) {
+                this.applyUserProfile(res.data);
+                this.hideLoginOverlay();
+                await this.loadChatHistories();
+                await this.loadToolStatus();
+            } else {
+                this.handleUnauthorized();
+            }
+        } catch (e) {
+            if (version !== this.authVersion) return;
+            console.error('校验登录状态失败:', e);
+            this.showLoginOverlay();
+        }
+    }
+
+    // 提交账号密码登录
+    async handleLoginSubmit(username, password) {
+        if (this.authBusy) return;
+        if (this.isStreaming) {
+            this.showNotification('请等待当前请求完成后再切换账号', 'warning');
+            return;
+        }
+        if (!username || !password) {
+            if (this.loginError) {
+                this.loginError.textContent = '请输入运维账号与密码';
+                this.loginError.hidden = false;
+            }
+            return;
+        }
+        this.authBusy = true;
+        if (this.loginSubmitBtn) this.loginSubmitBtn.disabled = true;
+        if (this.loginError) this.loginError.hidden = true;
+
+        try {
+            const resp = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+            const res = await resp.json();
+            if (!resp.ok || res.code !== 200) {
+                const msg = res.detail || res.message || '用户名或密码错误';
+                if (this.loginError) {
+                    this.loginError.textContent = msg;
+                    this.loginError.hidden = false;
+                }
+                return;
+            }
+
+            const { access_token, user } = res.data;
+            this.clearAuthState();
+            this.accessToken = access_token;
+            localStorage.setItem('oncall_access_token', access_token);
+            this.applyUserProfile(user);
+
+            // 重置并加载该租户专属会话列表
+            this.currentChatHistory = [];
+            this.chatHistories = [];
+            this.isCurrentChatFromHistory = false;
+            this.newChat();
+            this.hideLoginOverlay();
+            await this.loadChatHistories();
+            await this.loadToolStatus();
+            this.showNotification(`已登录：${user.display_name}`, 'success');
+        } catch (e) {
+            console.error('登录请求异常:', e);
+            if (this.loginError) {
+                this.loginError.textContent = '无法连接认证服务，请确认后端已启动';
+                this.loginError.hidden = false;
+            }
+        } finally {
+            this.authBusy = false;
+            if (this.loginSubmitBtn) this.loginSubmitBtn.disabled = false;
+        }
+    }
+
+    // 退出当前登录账号（返回登录页）
+    async logout() {
+        if (this.authBusy) return;
+        if (this.isStreaming) {
+            this.showNotification('请等待当前排障回复完成后再退出登录', 'warning');
+            return;
+        }
+        this.authBusy = true;
+        try {
+            const response = await fetch('/api/auth/logout', {method: 'POST', headers: this.authHeaders()});
+            if (!response.ok) throw new Error('退出登录失败，请重试');
+            this.clearAuthState();
+            localStorage.removeItem('oncall_access_token');
+            this.showLoginOverlay();
+        } catch (error) {
+            this.showNotification(error.message || '退出登录失败，请重试', 'error');
+        } finally {
+            this.authBusy = false;
+        }
+    }
+
+    // 加载历史会话列表（从 SQLite 持久化服务端按租户 Token 加载）
+    async loadChatHistories() {
+        if (!this.currentUser) return [];
+        try {
+            const response = await this.authFetch('/api/sessions');
+            if (response.ok) {
+                const res = await response.json();
+                const sessions = res.data.sessions || [];
+                this.chatHistories = sessions.map(s => ({
+                    id: s.session_id,
+                    title: s.title,
+                    updated_at: s.updated_at,
+                    message_count: s.message_count,
+                    preview: s.last_message_preview
+                }));
+                this.renderChatHistory();
+                return this.chatHistories;
+            }
+        } catch (e) {
+            console.error('从服务端加载历史会话失败:', e);
+        }
+        return [];
+    }
+
+    // 保存历史对话列表（兼容空实现）
     saveChatHistories() {
-        try {
-            localStorage.setItem('chatHistories', JSON.stringify(this.chatHistories));
-        } catch (e) {
-            console.error('保存历史对话失败:', e);
-        }
+        // 后端 SQLite 自动持久化
     }
-    
+
     // 渲染历史对话列表
     renderChatHistory() {
         if (!this.chatHistoryList) {
             return;
         }
-        
+
         this.chatHistoryList.innerHTML = '';
-        
-        if (this.chatHistories.length === 0) {
+
+        if (!this.chatHistories || this.chatHistories.length === 0) {
+            this.chatHistoryList.innerHTML = '<div style="padding: 12px; font-size: 12px; color: #80868b; text-align: center;">暂无历史排障记录</div>';
             return;
         }
-        
-        this.chatHistories.forEach((history, index) => {
+
+        this.chatHistories.forEach((history) => {
             const historyItem = document.createElement('div');
-            historyItem.className = 'history-item';
+            const isActive = history.id === this.sessionId;
+            historyItem.className = `history-item ${isActive ? 'active' : ''}`;
             historyItem.dataset.historyId = history.id;
-            
+
             historyItem.innerHTML = `
                 <div class="history-item-content">
-                    <span class="history-item-title">${this.escapeHtml(history.title)}</span>
+                    <span class="history-item-title" title="${this.escapeHtml(history.title)}">${this.escapeHtml(history.title)}</span>
                 </div>
-                <button class="history-item-delete" data-history-id="${history.id}" title="删除">
+                <button class="history-item-delete" data-history-id="${history.id}" title="删除会话，同时撤回关联事故">
                     <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                         <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                     </svg>
                 </button>
             `;
-            
+
             // 点击历史项加载对话
             historyItem.addEventListener('click', (e) => {
                 if (!e.target.closest('.history-item-delete')) {
                     this.loadChatHistory(history.id);
                 }
             });
-            
+
             // 删除历史对话
             const deleteBtn = historyItem.querySelector('.history-item-delete');
             deleteBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.deleteChatHistory(history.id);
             });
-            
+
             this.chatHistoryList.appendChild(historyItem);
         });
     }
-    
+
     // 加载历史对话
     async loadChatHistory(historyId) {
-        const history = this.chatHistories.find(h => h.id === historyId);
-        if (!history) {
-            return;
-        }
-        
-        // 如果当前有对话内容，且不是同一个对话，先保存
-        if (this.currentChatHistory.length > 0 && this.sessionId !== historyId) {
-            if (this.isCurrentChatFromHistory) {
-                // 如果当前对话也是从历史记录加载的，更新它
-                this.updateCurrentChatHistory();
-            } else {
-                // 如果当前对话是新对话，保存为新历史
-                this.saveCurrentChat();
-            }
-        }
-        
+        if (this.isStreaming) return;
         try {
-            // 从后端获取会话历史
-            const response = await fetch(`/api/chat/session/${historyId}`);
-            if (response.ok) {
-                const data = await response.json();
-                const backendHistory = data.history || [];
-                
-                // 更新会话ID
-                this.sessionId = history.id;
-                this.isCurrentChatFromHistory = true;
-                
-                // 清空并重新渲染消息
-                if (this.chatMessages) {
-                    this.chatMessages.innerHTML = '';
-                    
-                    // 如果后端有历史记录，使用后端的
-                    if (backendHistory.length > 0) {
-                        this.currentChatHistory = [];
-                        backendHistory.forEach(msg => {
-                            // 后端返回格式: {role: "user|assistant", content: "...", timestamp: "..."}
-                            const messageType = msg.role === 'user' ? 'user' : 'bot';
-                            this.addMessage(messageType, msg.content, false, false);
-                        });
-                    } else {
-                        // 否则使用localStorage的历史记录
-                        this.currentChatHistory = [...history.messages];
-                        history.messages.forEach(msg => {
-                            this.addMessage(msg.type, msg.content, false, false);
-                        });
-                    }
-                }
-            } else {
-                // 如果后端请求失败，使用localStorage的历史记录
-                console.warn('从后端加载历史失败，使用本地缓存');
-                this.sessionId = history.id;
-                this.currentChatHistory = [...history.messages];
-                this.isCurrentChatFromHistory = true;
-                
-                if (this.chatMessages) {
-                    this.chatMessages.innerHTML = '';
-                    history.messages.forEach(msg => {
-                        this.addMessage(msg.type, msg.content, false, false);
-                    });
-                }
-            }
-        } catch (error) {
-            console.error('加载会话历史失败:', error);
-            // 出错时使用localStorage的历史记录
-            this.sessionId = history.id;
-            this.currentChatHistory = [...history.messages];
+            const response = await this.authFetch(`/api/sessions/${encodeURIComponent(historyId)}`);
+            if (!response.ok) throw new Error('会话不存在或加载失败');
+            const result = await response.json();
+            this.sessionId = historyId;
             this.isCurrentChatFromHistory = true;
-            
-            if (this.chatMessages) {
-                this.chatMessages.innerHTML = '';
-                history.messages.forEach(msg => {
-                    this.addMessage(msg.type, msg.content, false, false);
-                });
+            this.currentChatHistory = [];
+            this.chatMessages.innerHTML = '';
+            for (const msg of result.data.messages || []) {
+                const type = msg.role === 'user' ? 'user' : 'assistant';
+                this.currentChatHistory.push({type, content: msg.content, timestamp: msg.timestamp});
+                const message = this.addMessage(type, msg.content, false, false);
+                if (type === 'assistant') this.renderExecutionTrace(message, msg.execution_trace);
             }
+            this.checkAndSetCentered();
+            this.renderChatHistory();
+        } catch (error) {
+            this.showNotification(error.message, 'error');
         }
-        
-        // 更新UI
-        this.checkAndSetCentered();
-        this.renderChatHistory();
     }
-    
+
     // 删除历史对话
     async deleteChatHistory(historyId) {
+        if (this.isStreaming) return;
         try {
-            // 调用后端API清空会话
-            const response = await fetch('/api/chat/clear', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    session_id: historyId
-                })
+            const response = await this.authFetch(`/api/sessions/${encodeURIComponent(historyId)}`, {
+                method: 'DELETE'
             });
 
             if (!response.ok) {
-                throw new Error('清空会话失败');
+                throw new Error('删除会话失败');
             }
 
-            const result = await response.json();
-            
-            if (result.status === 'success') {
-                // 从本地存储中删除
-                this.chatHistories = this.chatHistories.filter(h => h.id !== historyId);
-                this.saveChatHistories();
-                this.renderChatHistory();
-                
-                // 如果删除的是当前对话，清空当前对话
-                if (this.sessionId === historyId) {
-                    this.currentChatHistory = [];
-                    if (this.chatMessages) {
-                        this.chatMessages.innerHTML = '';
-                    }
-                    this.sessionId = this.generateSessionId();
-                    this.checkAndSetCentered();
+            this.chatHistories = this.chatHistories.filter(h => h.id !== historyId);
+            this.renderChatHistory();
+
+            // 如果删除的是当前对话，清空当前对话
+            if (this.sessionId === historyId) {
+                this.currentChatHistory = [];
+                if (this.chatMessages) {
+                    this.chatMessages.innerHTML = '';
                 }
-                
-                this.showNotification('会话已清空', 'success');
-            } else {
-                throw new Error(result.message || '清空会话失败');
+                this.sessionId = this.generateSessionId();
+                this.checkAndSetCentered();
             }
+
+            this.showNotification('会话及其关联的事故经验已清理，个人画像保留。', 'success');
         } catch (error) {
             console.error('删除历史对话失败:', error);
             this.showNotification('删除失败: ' + error.message, 'error');
@@ -683,15 +1097,15 @@ class OnCallAegntApp {
             this.showNotification('请等待当前对话完成后再切换模式', 'warning');
             return;
         }
-        
+
         this.currentMode = mode;
         this.updateUI();
-        
+
         const modeNames = {
-            'quick': '快速',
-            'stream': '流式'
+            'quick': '快速直出',
+            'stream': '流式推演'
         };
-        
+
         this.showNotification(`已切换到${modeNames[mode]}模式`, 'info');
     }
 
@@ -700,12 +1114,12 @@ class OnCallAegntApp {
         // 更新模式选择器显示
         if (this.currentModeText) {
             const modeNames = {
-                'quick': '快速',
-                'stream': '流式'
+                'quick': '快速直出',
+                'stream': '流式推演'
             };
-            this.currentModeText.textContent = modeNames[this.currentMode] || '快速';
+            this.currentModeText.textContent = modeNames[this.currentMode] || '流式推演';
         }
-        
+
         // 更新下拉菜单选中状态
         const dropdownItems = document.querySelectorAll('.dropdown-item');
         dropdownItems.forEach(item => {
@@ -716,22 +1130,27 @@ class OnCallAegntApp {
                 item.classList.remove('active');
             }
         });
-        
+
         // 更新发送按钮状态
         if (this.sendButton) {
             this.sendButton.disabled = this.isStreaming;
         }
-        
+
         // 更新输入框状态
         if (this.messageInput) {
             this.messageInput.disabled = this.isStreaming;
-            this.messageInput.placeholder = '问问智能OnCall助手';
+            this.messageInput.placeholder = '输入告警信息、报错日志、K8s 命令或运维排障问题 (Enter 发送)...';
         }
     }
 
     // 生成随机会话ID
     generateSessionId() {
-        return 'session_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+        if (typeof crypto.randomUUID === 'function') {
+            return 'session_' + crypto.randomUUID();
+        }
+        // getRandomValues is also available on plain HTTP LAN origins.
+        const bytes = crypto.getRandomValues(new Uint8Array(16));
+        return 'session_' + Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
     }
 
     // 发送消息
@@ -740,7 +1159,7 @@ class OnCallAegntApp {
         if (this.messageInput) {
             message = this.messageInput.value.trim();
         }
-        
+
         if (!message) {
             this.showNotification('请输入消息内容', 'warning');
             return;
@@ -753,7 +1172,7 @@ class OnCallAegntApp {
 
         // 显示用户消息
         this.addMessage('user', message);
-        
+
         // 清空输入框
         if (this.messageInput) {
             this.messageInput.value = '';
@@ -771,11 +1190,11 @@ class OnCallAegntApp {
             }
         } catch (error) {
             console.error('发送消息失败:', error);
-            this.addMessage('assistant', '抱歉，发送消息时出现错误：' + error.message);
+            if (this.currentUser) this.addMessage('assistant', '抱歉，发送消息时出现错误：' + error.message);
         } finally {
             this.isStreaming = false;
             this.updateUI();
-            
+
             // 如果当前对话是从历史记录加载的，更新历史记录
             if (this.isCurrentChatFromHistory && this.currentChatHistory.length > 0) {
                 this.updateCurrentChatHistory();
@@ -788,9 +1207,9 @@ class OnCallAegntApp {
     async sendQuickMessage(message) {
         // 添加等待提示消息
         const loadingMessage = this.addLoadingMessage('正在思考...');
-        
+
         try {
-            const response = await fetch(`${this.apiBaseUrl}/chat`, {
+            const response = await this.authFetch(`${this.apiBaseUrl}/chat`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -805,22 +1224,26 @@ class OnCallAegntApp {
             if (!response.ok) {
                 throw new Error(data.data?.errorMessage || data.detail || data.message || `HTTP错误: ${response.status}`);
             }
-            console.log('[sendQuickMessage] 响应数据:', JSON.stringify(data));
-            
+
             // 移除等待提示消息
             if (loadingMessage && loadingMessage.parentNode) {
                 loadingMessage.parentNode.removeChild(loadingMessage);
             }
-            
+
             // 统一响应格式：检查 data.code 或 data.message 判断请求是否成功
             if (data.code === 200 || data.message === 'success') {
                 // data.data 是 ChatResponse 对象
                 const chatResponse = data.data;
-                
+
                 if (chatResponse && chatResponse.success) {
                     // 成功：添加实际响应消息（即使 answer 为空也显示）
                     const answer = chatResponse.answer || '（无回复内容）';
-                    this.addMessage('assistant', answer);
+                    const msgElement = this.addMessage('assistant', answer);
+                    this.renderMemoryBadge(msgElement, chatResponse.memory);
+                    this.notifyMemoryJob(chatResponse.memory_job_id);
+
+                    const routeTrace = chatResponse.route ? [{type: 'route', data: chatResponse.route}] : [];
+                    this.renderExecutionTrace(msgElement, chatResponse.execution_trace ?? routeTrace);
                 } else if (chatResponse && chatResponse.errorMessage) {
                     // 业务错误
                     throw new Error(chatResponse.errorMessage);
@@ -829,6 +1252,8 @@ class OnCallAegntApp {
                     const fallbackAnswer = chatResponse?.answer || chatResponse?.errorMessage || '服务返回了空内容';
                     this.addMessage('assistant', fallbackAnswer);
                 }
+                // 刷新侧边栏持久化历史
+                this.loadChatHistories();
             } else {
                 // HTTP 成功但业务失败
                 throw new Error(data.data?.errorMessage || data.message || '请求失败');
@@ -845,7 +1270,7 @@ class OnCallAegntApp {
     // 发送流式消息
     async sendStreamMessage(message) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/chat_stream`, {
+            const response = await this.authFetch(`${this.apiBaseUrl}/chat_stream`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -859,10 +1284,13 @@ class OnCallAegntApp {
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
-            
+
             // 创建助手消息元素
             const assistantMessageElement = this.addMessage('assistant', '', true);
             let fullResponse = '';
+            const streamStartTime = Date.now();
+            let thoughtContainer = null;
+            let thoughtStepCount = 0;
 
             // 处理流式响应
             const reader = response.body.getReader();
@@ -873,74 +1301,87 @@ class OnCallAegntApp {
             try {
                 while (true) {
                     const { done, value } = await reader.read();
-                    
+
                     if (done) {
-                        // 流结束，使用统一的处理方法
+                        // 流结束，自动折叠思考面板并最终渲染
+                        if (thoughtContainer) {
+                            this.completeThoughtAccordion(thoughtContainer, thoughtStepCount, streamStartTime);
+                        }
                         this.handleStreamComplete(assistantMessageElement, fullResponse);
                         break;
                     }
 
                     // 解码数据并添加到缓冲区
                     buffer += decoder.decode(value, { stream: true });
-                    
+
                     // 按行分割处理
                     const lines = buffer.split('\n');
-                    // 保留最后一行（可能不完整）
                     buffer = lines.pop() || '';
-                    
+
                     for (const line of lines) {
                         if (line.trim() === '') continue;
-                        
-                        console.log('[SSE调试] 收到行:', line);
-                        
+
                         // 解析SSE格式
                         if (line.startsWith('id:')) {
-                            console.log('[SSE调试] 解析到ID');
                             continue;
                         } else if (line.startsWith('event:')) {
-                            // 兼容 "event:message" 和 "event: message" 两种格式
                             currentEvent = line.substring(6).trim();
-                            console.log('[SSE调试] 解析到事件类型:', currentEvent);
-                            // 注意：后端统一使用 "message" 事件名，真正的类型在 data 的 JSON 中
                             continue;
                         } else if (line.startsWith('data:')) {
-                            // 兼容 "data:xxx" 和 "data: xxx" 两种格式
                             const rawData = line.substring(5).trim();
-                            console.log('[SSE调试] 解析到数据, currentEvent:', currentEvent, ', rawData:', rawData);
-                            
+
                             // 兼容旧格式 [DONE] 标记
                             if (rawData === '[DONE]') {
-                                // 流结束标记，将内容转换为Markdown渲染
+                                if (thoughtContainer) {
+                                    this.completeThoughtAccordion(thoughtContainer, thoughtStepCount, streamStartTime);
+                                }
                                 this.handleStreamComplete(assistantMessageElement, fullResponse);
                                 return;
                             }
-                            
+
                             // 处理 SSE 数据
+                            let sseMessage;
                             try {
-                                // 尝试解析为 SseMessage 格式的 JSON
-                                const sseMessage = JSON.parse(rawData);
-                                console.log('[SSE调试] 解析JSON成功:', sseMessage);
-                                
+                                sseMessage = JSON.parse(rawData);
+
                                 if (sseMessage && typeof sseMessage.type === 'string') {
-                                    if (sseMessage.type === 'content') {
+                                    if (EXECUTION_EVENT_TYPES.has(sseMessage.type)) {
+                                        if (!thoughtContainer) thoughtContainer = this.createThoughtContainer(assistantMessageElement);
+                                        thoughtStepCount += this.renderExecutionEvent(thoughtContainer, sseMessage);
+                                    }
+                                    else if (sseMessage.type === 'memory_recall') {
+                                        this.renderMemoryBadge(assistantMessageElement, sseMessage.data);
+                                    }
+                                    // 4. 正文流式渲染
+                                    else if (sseMessage.type === 'content') {
                                         const content = sseMessage.data || '';
                                         fullResponse += content;
-                                        console.log('[SSE调试] 添加内容:', content);
-                                        
-                                        // 实时渲染 Markdown
+
                                         if (assistantMessageElement) {
                                             const messageContent = assistantMessageElement.querySelector('.message-content');
                                             messageContent.innerHTML = this.renderMarkdown(fullResponse);
-                                            // 高亮代码块
                                             this.highlightCodeBlocks(messageContent);
                                             this.scrollToBottom();
                                         }
-                                    } else if (sseMessage.type === 'done') {
-                                        console.log('[SSE调试] 收到done标记，流结束');
+                                    }
+                                    // 5. 完成事件 -> 自动折叠思考面板，仅露总结报告
+                                    else if (sseMessage.type === 'done') {
+                                        this.notifyMemoryJob(sseMessage.data?.memory_job_id);
+                                        if (typeof sseMessage.data?.answer === 'string') {
+                                            fullResponse = sseMessage.data.answer;
+                                        }
+                                        if (thoughtContainer) {
+                                            this.completeThoughtAccordion(thoughtContainer, thoughtStepCount, streamStartTime);
+                                        }
                                         this.handleStreamComplete(assistantMessageElement, fullResponse);
                                         return;
-                                    } else if (sseMessage.type === 'error') {
-                                        console.error('[SSE调试] 收到错误:', sseMessage.data);
+                                    }
+                                    // 6. 异常事件
+                                    else if (sseMessage.type === 'error') {
+                                        if (thoughtContainer) {
+                                            this.addThoughtStep(thoughtContainer, 'badge-tool', '❌ 异常中断', String(sseMessage.data));
+                                            this.updateThoughtSummary(thoughtContainer, '执行异常中断', true);
+                                        }
                                         if (assistantMessageElement) {
                                             const messageContent = assistantMessageElement.querySelector('.message-content');
                                             messageContent.innerHTML = this.renderMarkdown('错误: ' + (sseMessage.data || '未知错误'));
@@ -948,8 +1389,7 @@ class OnCallAegntApp {
                                         return;
                                     }
                                 } else {
-                                    // 不是标准 SseMessage 格式，尝试兼容处理
-                                    console.log('[SSE调试] 非标准格式，尝试兼容处理');
+                                    // 兼容非 JSON 纯文本流
                                     fullResponse += rawData;
                                     if (assistantMessageElement) {
                                         const messageContent = assistantMessageElement.querySelector('.message-content');
@@ -959,14 +1399,13 @@ class OnCallAegntApp {
                                     }
                                 }
                             } catch (e) {
-                                // JSON 解析失败，尝试兼容旧格式
-                                console.log('[SSE调试] JSON解析失败，使用兼容模式:', e.message);
+                                if (EXECUTION_EVENT_TYPES.has(sseMessage?.type)) throw e;
                                 if (rawData === '') {
                                     fullResponse += '\n';
                                 } else {
                                     fullResponse += rawData;
                                 }
-                                
+
                                 if (assistantMessageElement) {
                                     const messageContent = assistantMessageElement.querySelector('.message-content');
                                     messageContent.innerHTML = this.renderMarkdown(fullResponse);
@@ -978,6 +1417,10 @@ class OnCallAegntApp {
                     }
                 }
             } finally {
+                // 确保在流关闭或中断时也触发优雅折叠
+                if (thoughtContainer && thoughtContainer.hasAttribute('open') && fullResponse) {
+                    this.completeThoughtAccordion(thoughtContainer, thoughtStepCount, streamStartTime);
+                }
                 reader.releaseLock();
             }
         } catch (error) {
@@ -985,11 +1428,222 @@ class OnCallAegntApp {
         }
     }
 
+    // ========================================================
+    // Codex / DeepSeek R1 风格：Agent 思考轨迹与折叠组件管理
+    // ========================================================
+    createThoughtContainer(assistantMessageElement) {
+        if (!assistantMessageElement) return null;
+        const wrapper = assistantMessageElement.querySelector('.message-content-wrapper');
+        if (!wrapper) return null;
+        let container = wrapper.querySelector('.agent-thought-container');
+        if (container) return container;
+
+        container = document.createElement('details');
+        container.className = 'agent-thought-container';
+        container.setAttribute('open', 'true');
+
+        container.innerHTML = `
+            <summary class="agent-thought-summary">
+                <div class="summary-left">
+                    <span class="thought-spinner"></span>
+                    <span class="summary-title">任务主管决策中...</span>
+                </div>
+                <svg class="summary-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="9 18 15 12 9 6"></polyline>
+                </svg>
+            </summary>
+            <div class="agent-thought-steps"></div>
+        `;
+
+        const content = wrapper.querySelector('.message-content');
+        if (content) {
+            wrapper.insertBefore(container, content);
+        } else {
+            wrapper.appendChild(container);
+        }
+        return container;
+    }
+
+    notifyMemoryJob(jobId) {
+        if (jobId) this.showNotification('记忆提取已排队，可在「长期记忆 → 任务状态」查看。', 'success');
+    }
+
+    renderMemoryBadge(message, memory) {
+        if (!message || !memory) return;
+        const wrapper = message.querySelector('.message-content-wrapper');
+        if (!wrapper) return;
+        const statuses = {
+            recalled: '已参考事故经验', profile_only: '已参考个人画像',
+            degraded: '部分记忆暂不可用', no_match: '本轮未使用事故经验',
+        };
+        const reasons = {
+            scope_unavailable: '未确定适用环境',
+            timeout: '读取超时', memory_unavailable: '记忆读取失败',
+            lexical_limited: '词法检索受限', lexical_unavailable: '词法检索暂不可用',
+            vector_budget_disabled: '向量调用未启用', vector_unavailable: '向量检索暂不可用',
+        };
+        const title = statuses[memory.status];
+        if (!title || (memory.status === 'no_match' && !memory.reason)) return;
+        const entries = Array.isArray(memory.incidents) ? memory.incidents : [];
+        const row = document.createElement('div');
+        row.className = 'thought-step-item memory-recall-badge';
+        const badge = document.createElement('span');
+        badge.className = 'step-badge badge-step';
+        badge.textContent = title;
+        const details = document.createElement('span');
+        details.className = 'step-text';
+        details.textContent = [reasons[memory.reason], ...entries.map(item => `${item.title}（版本 ${item.revision}）`)]
+            .filter(Boolean).join(' · ');
+        row.append(badge, details);
+        wrapper.querySelector('.memory-recall-badge')?.remove();
+        wrapper.prepend(row);
+    }
+
+    addThoughtStep(container, badgeClass, badgeLabel, stepText, latencyText = '') {
+        if (!container) return;
+        const stepsList = container.querySelector('.agent-thought-steps');
+        if (!stepsList) return;
+
+        const stepItem = document.createElement('div');
+        stepItem.className = 'thought-step-item';
+        stepItem.innerHTML = `
+            <span class="step-badge ${badgeClass}">${badgeLabel}</span>
+            <div class="step-text">${stepText}</div>
+            ${latencyText ? `<span class="step-latency">${latencyText}</span>` : ''}
+        `;
+        stepsList.appendChild(stepItem);
+
+        // 自动平滑滚动到最新步骤
+        stepsList.scrollTop = stepsList.scrollHeight;
+    }
+
+    renderExecutionTrace(message, events) {
+        if (!events?.length) return;
+        const container = this.createThoughtContainer(message);
+        let count = 0;
+        for (const event of events) count += this.renderExecutionEvent(container, event);
+        this.completeThoughtAccordion(container, count);
+    }
+
+    renderExecutionEvent(container, event) {
+        const data = event.data || {};
+        switch (event.type) {
+            case 'route': {
+                const sources = {
+                    rule_fast_pass: '规则快速放行', semantic_router: '语义向量聚类',
+                    llm_supervisor: 'Supervisor LLM 结构化仲裁',
+                };
+                const intents = {
+                    knowledge_qa: 'ReAct 知识与工具智能体', aiops_diagnosis: 'AIOps 线上排障工作流',
+                    general_chat: '通用轻量闲聊',
+                };
+                const source = sources[data.source] || '意图判定';
+                const intent = intents[data.intent] || '业务链路';
+                const reason = data.reason ? ` · ${this.escapeHtml(data.reason)}` : '';
+                const latency = Number.isFinite(data.latency_ms) ? `${data.latency_ms}ms` : '';
+                this.addThoughtStep(container, 'badge-route', '🎯 任务路由',
+                    `<strong>${source}</strong> → 分流至【${intent}】<span style="color:#64748b;">${reason}</span>`, latency);
+                this.updateThoughtSummary(container, `任务主管已决策 → 正在执行 ${intent}...`);
+                break;
+            }
+            case 'aiops_progress':
+                return this.renderAIOpsProgress(container, data);
+            case 'tool_call': {
+                const tool = data.tool || 'system_tool';
+                const status = data.status || '执行中';
+                const query = data.query ? ` · <code>${this.escapeHtml(data.query)}</code>` : '';
+                const details = data.details ? ` <span style="color:#64748b;">(${this.escapeHtml(data.details)})</span>` : '';
+
+                if (tool === 'search_web') {
+                    this.addThoughtStep(container, 'badge-step', '🌐 联网搜索',
+                        `通过 Tavily 检索公网资料${query}${details}`);
+                    this.updateThoughtSummary(container, '正在进行公网信息检索…');
+                } else if (tool === 'retrieve_knowledge') {
+                    this.addThoughtStep(container, 'badge-step', '🔍 知识检索',
+                        `检索内部知识库与排障 SOP${query}${details}`);
+                    this.updateThoughtSummary(container, '正在检索内部知识库…');
+                } else if (tool === 'get_current_time') {
+                    this.addThoughtStep(container, 'badge-step', '⏱️ 时间锚定',
+                        `获取权威系统当前时间基准${details}`);
+                    this.updateThoughtSummary(container, '正在核对当前时间…');
+                } else {
+                    this.addThoughtStep(container, 'badge-tool', '⚡ 工具调用',
+                        `调用运维工具: <code>${this.escapeHtml(tool)}</code> (${this.escapeHtml(status)})${details}`);
+                    this.updateThoughtSummary(container, `正在执行工具 ${this.escapeHtml(tool)}…`);
+                }
+                break;
+            }
+            case 'search_results': {
+                const count = data.count ? `已召回 ${data.count} 条相关内部文档分片` : '父子文档切片与 SOP 召回完成';
+                const docs = Array.isArray(data.docs) && data.docs.length > 0
+                    ? `<div style="margin-top:4px; font-size:12px; color:#475569;">${data.docs.map(d => `• <code>${this.escapeHtml(d)}</code>`).join('<br>')}</div>`
+                    : '';
+                this.addThoughtStep(container, 'badge-step', '📚 知识召回', `${count}${docs}`);
+                break;
+            }
+            case 'compaction': {
+                const isMacro = data.stage === 'macro';
+                const tokens = data.details?.final_tokens;
+                this.addThoughtStep(container, isMacro ? 'badge-route' : 'badge-tool',
+                    isMacro ? '🧠 宏观上下文归纳' : '✂️ 工具输出剪枝',
+                    this.escapeHtml(data.message || '正在优化上下文...'), Number.isFinite(tokens) ? `${tokens} Tokens` : '');
+                this.updateThoughtSummary(container, isMacro ? '正在压缩长上下文…' : '正在剪枝工具输出…');
+                break;
+            }
+            case 'debug':
+                this.addThoughtStep(container, 'badge-step', '⚙️ 步骤流转',
+                    `流转节点: <code>${this.escapeHtml(event.node || 'workflow')}</code> (${this.escapeHtml(event.message_type || 'info')})`);
+                break;
+            default:
+                return 0;
+        }
+        return 1;
+    }
+
+    renderAIOpsProgress(container, event) {
+        if (event.type === 'plan' && Array.isArray(event.plan)) {
+            const items = event.plan.map(step => `<li>${this.escapeHtml(step)}</li>`).join('');
+            const title = `查看执行计划（${event.plan.length} 项）`;
+            this.addThoughtStep(container, 'badge-step', '执行计划',
+                `<details class="aiops-plan-details"><summary>${title}</summary><ol>${items}</ol></details>`);
+            this.updateThoughtSummary(container, `排障计划已制定 · ${event.plan.length} 项`);
+            return 1;
+        }
+        if (event.type === 'step_complete') {
+            this.addThoughtStep(container, 'badge-done', '步骤结束', this.escapeHtml(event.current_step));
+            this.updateThoughtSummary(container, `排障执行中 · 剩余 ${event.remaining_steps} 项`);
+            return 1;
+        }
+        if (event.type === 'status' && event.stage === 'replanner') {
+            this.updateThoughtSummary(container, '正在评估下一步…');
+        }
+        return 0;
+    }
+
+    updateThoughtSummary(container, titleText, isDone = false) {
+        if (!container) return;
+        const titleEl = container.querySelector('.summary-title');
+        if (titleEl) titleEl.textContent = titleText;
+        const spinner = container.querySelector('.thought-spinner');
+        if (isDone && spinner) {
+            spinner.remove();
+        }
+    }
+
+    completeThoughtAccordion(container, totalSteps, startTime) {
+        if (!container) return;
+        const duration = startTime ? ` · 耗时 ${((Date.now() - startTime) / 1000).toFixed(1)}s` : '';
+        const title = `✅ 分析与排障完成 (${totalSteps} 条记录${duration} · 点击展开执行明细)`;
+        this.updateThoughtSummary(container, title, true);
+        // 核心：任务完成后自动折叠，保持主界面清爽
+        container.removeAttribute('open');
+    }
+
     // 添加消息到聊天界面
     addMessage(type, content, isStreaming = false, saveToHistory = true) {
         // 检查是否是第一条消息，如果是则移除居中样式
         const isFirstMessage = this.chatMessages && this.chatMessages.querySelectorAll('.message').length === 0;
-        
+
         // 保存消息到当前对话历史（如果不是流式消息且需要保存）
         if (!isStreaming && saveToHistory && content) {
             this.currentChatHistory.push({
@@ -998,7 +1652,7 @@ class OnCallAegntApp {
                 timestamp: new Date().toISOString()
             });
         }
-        
+
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${type}${isStreaming ? ' streaming' : ''}`;
 
@@ -1020,7 +1674,7 @@ class OnCallAegntApp {
 
         const messageContent = document.createElement('div');
         messageContent.className = 'message-content';
-        
+
         // 如果是assistant消息且不是流式消息，使用Markdown渲染
         if (type === 'assistant' && !isStreaming) {
             messageContent.innerHTML = this.renderMarkdown(content);
@@ -1036,14 +1690,14 @@ class OnCallAegntApp {
 
         if (this.chatMessages) {
             this.chatMessages.appendChild(messageDiv);
-            
+
             // 如果是第一条消息，移除居中样式并添加动画
             if (isFirstMessage && this.chatContainer) {
                 this.chatContainer.classList.remove('centered');
                 // 添加动画类
                 this.chatContainer.style.transition = 'all 0.5s ease';
             }
-            
+
             this.scrollToBottom();
         }
 
@@ -1071,11 +1725,11 @@ class OnCallAegntApp {
 
         const messageContent = document.createElement('div');
         messageContent.className = 'message-content loading-message-content';
-        
+
         // 创建文本和动画容器
         const textSpan = document.createElement('span');
         textSpan.textContent = content;
-        
+
         // 创建旋转动画图标
         const loadingIcon = document.createElement('span');
         loadingIcon.className = 'loading-spinner-icon';
@@ -1085,7 +1739,7 @@ class OnCallAegntApp {
                 <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10c1.54 0 3-.36 4.28-1l-1.5-2.6C13.64 19.62 12.84 20 12 20c-4.41 0-8-3.59-8-8s3.59-8 8-8c.84 0 1.64.38 2.18 1l1.5-2.6C13 2.36 12.54 2 12 2z" fill="currentColor"/>
             </svg>
         `;
-        
+
         messageContent.appendChild(textSpan);
         messageContent.appendChild(loadingIcon);
         messageContentWrapper.appendChild(messageContent);
@@ -1093,20 +1747,20 @@ class OnCallAegntApp {
 
         if (this.chatMessages) {
             this.chatMessages.appendChild(messageDiv);
-            
+
             // 如果是第一条消息，移除居中样式
             const isFirstMessage = this.chatMessages.querySelectorAll('.message').length === 1;
             if (isFirstMessage && this.chatContainer) {
                 this.chatContainer.classList.remove('centered');
                 this.chatContainer.style.transition = 'all 0.5s ease';
             }
-            
+
             this.scrollToBottom();
         }
 
         return messageDiv;
     }
-    
+
     // 检查并设置居中样式
     checkAndSetCentered() {
         if (this.chatMessages && this.chatContainer) {
@@ -1144,11 +1798,8 @@ class OnCallAegntApp {
                 content: fullResponse,
                 timestamp: new Date().toISOString()
             });
-            // 如果当前对话是从历史记录加载的，更新历史记录
-            if (this.isCurrentChatFromHistory) {
-                this.updateCurrentChatHistory();
-                this.renderChatHistory();
-            }
+            // 无论新会话还是旧会话，通知侧边栏刷新持久化历史列表
+            this.loadChatHistories();
         }
     }
 
@@ -1235,10 +1886,10 @@ class OnCallAegntApp {
         }
     }
 
-    async knowledgeRequest(path, options) {
+    async knowledgeRequest(path, options = {}) {
         let response;
         try {
-            response = await fetch(`${this.apiBaseUrl}${path}`, options);
+            response = await this.authFetch(`${this.apiBaseUrl}${path}`, options);
         } catch (error) {
             throw new Error('无法连接后端或连接已中断，当前无法确认操作结果。请检查服务和网络，并查看 LangSmith 中的执行记录。');
         }
@@ -1382,7 +2033,7 @@ class OnCallAegntApp {
     // 发送智能运维请求（SSE 流式模式）
     async sendAIOpsRequest(loadingMessageElement) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/aiops`, {
+            const response = await this.authFetch(`${this.apiBaseUrl}/aiops`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1407,7 +2058,7 @@ class OnCallAegntApp {
             try {
                 while (true) {
                     const { done, value } = await reader.read();
-                    
+
                     if (done) {
                         // 流结束，更新最终内容
                         if (fullResponse) {
@@ -1419,17 +2070,16 @@ class OnCallAegntApp {
 
                     // 解码数据并添加到缓冲区
                     buffer += decoder.decode(value, { stream: true });
-                    
+
                     // 按行分割处理
                     const lines = buffer.split('\n');
                     // 保留最后一行（可能不完整）
                     buffer = lines.pop() || '';
-                    
+
                     for (const line of lines) {
                         if (line.trim() === '') continue;
-                        
-                        console.log('[AI Ops SSE] 收到行:', line);
-                        
+
+
                         // 解析 SSE 格式
                         if (line.startsWith('id:')) {
                             continue;
@@ -1439,13 +2089,12 @@ class OnCallAegntApp {
                             continue;
                         } else if (line.startsWith('data:')) {
                             const rawData = line.substring(5).trim();
-                            console.log('[AI Ops SSE] 数据:', rawData, ', currentEvent:', currentEvent);
-                            
+
                             // 解析可能包含多个JSON对象的数据
                             const processJsonMessages = (data) => {
                                 const jsonPattern = /\{"type"\s*:\s*"[^"]+"\s*,\s*"data"\s*:\s*(?:"[^"]*"|null)\}/g;
                                 const matches = data.match(jsonPattern);
-                                
+
                                 if (matches && matches.length > 0) {
                                     console.log('[AI Ops SSE] 匹配到', matches.length, '个JSON对象');
                                     for (const jsonStr of matches) {
@@ -1497,7 +2146,7 @@ class OnCallAegntApp {
                                 }
                                 return null;
                             };
-                            
+
                             const result = processJsonMessages(rawData);
                             if (result === true) {
                                 return; // 流结束
@@ -1506,7 +2155,9 @@ class OnCallAegntApp {
                                 try {
                                     const sseMessage = JSON.parse(rawData);
                                     if (sseMessage && sseMessage.type) {
-                                        if (sseMessage.type === 'content') {
+                                        if (sseMessage.type === 'memory_recall') {
+                                            this.renderMemoryBadge(loadingMessageElement, sseMessage.data);
+                                        } else if (sseMessage.type === 'content') {
                                             fullResponse += sseMessage.data || '';
                                             if (loadingMessageElement) {
                                                 this.updateAIOpsStreamContent(loadingMessageElement, fullResponse);
@@ -1543,9 +2194,9 @@ class OnCallAegntApp {
                                         } else if (sseMessage.type === 'complete') {
                                             // 处理完成事件
                                             console.log('AI Ops 诊断完成，最终内容长度:', fullResponse.length);
-                                            if (sseMessage.response) {
-                                                fullResponse += `\n\n${sseMessage.response}`;
-                                            }
+                                            this.notifyMemoryJob(sseMessage.memory_job_id);
+                                            const report = sseMessage.diagnosis?.report || sseMessage.response;
+                                            if (report) fullResponse = report;
                                             // 使用最终的完整内容更新消息
                                             this.updateAIOpsMessage(loadingMessageElement, fullResponse, []);
                                             return;
@@ -1585,10 +2236,10 @@ class OnCallAegntApp {
     // 更新智能运维流式内容（实时显示）
     updateAIOpsStreamContent(messageElement, content) {
         if (!messageElement) return;
-        
+
         // 添加 aiops-message 类
         messageElement.classList.add('aiops-message');
-        
+
         const messageContentWrapper = messageElement.querySelector('.message-content-wrapper');
         if (messageContentWrapper) {
             let messageContent = messageContentWrapper.querySelector('.message-content');
@@ -1610,7 +2261,7 @@ class OnCallAegntApp {
         console.log('response:', response);
         console.log('response length:', response ? response.length : 0);
         console.log('details:', details);
-        
+
         if (!messageElement) {
             // 如果没有传入消息元素，则创建新消息
             console.log('messageElement 为空，创建新消息');
@@ -1637,7 +2288,7 @@ class OnCallAegntApp {
         // 移除加载动画相关的类和内容
         messageContent.classList.remove('loading-message-content');
         messageContent.textContent = '';
-        
+
         // 移除加载图标（如果存在）
         const loadingIcon = messageContent.querySelector('.loading-spinner-icon');
         if (loadingIcon) {
@@ -1668,7 +2319,7 @@ class OnCallAegntApp {
 
             const detailsContent = document.createElement('div');
             detailsContent.className = 'details-content';
-            
+
             details.forEach((detail, index) => {
                 const detailItem = document.createElement('div');
                 detailItem.className = 'detail-item';
@@ -1695,14 +2346,14 @@ class OnCallAegntApp {
         // 高亮代码块
         this.highlightCodeBlocks(messageContent);
         console.log('代码块高亮完成');
-        
+
         // 保存到历史记录
         this.currentChatHistory.push({
             type: 'assistant',
             content: response,
             timestamp: new Date().toISOString()
         });
-        
+
         this.scrollToBottom();
         return messageElement;
     }
@@ -1742,7 +2393,7 @@ class OnCallAegntApp {
 
             const detailsContent = document.createElement('div');
             detailsContent.className = 'details-content';
-            
+
             details.forEach((detail, index) => {
                 const detailItem = document.createElement('div');
                 detailItem.className = 'detail-item';
@@ -1769,7 +2420,7 @@ class OnCallAegntApp {
         this.highlightCodeBlocks(messageContent);
         messageContentWrapper.appendChild(messageContent);
         messageDiv.appendChild(messageContentWrapper);
-        
+
         if (this.chatMessages) {
             this.chatMessages.appendChild(messageDiv);
             this.scrollToBottom();
@@ -1794,11 +2445,11 @@ class OnCallAegntApp {
 
         // 新建对话
         this.newChat();
-        
+
         // 添加"分析中..."的消息（带旋转动画）
         const loadingMessage = this.addLoadingMessage('分析中...');
         this.currentAIOpsMessage = loadingMessage; // 保存消息引用用于后续更新
-        
+
         // 设置发送状态
         this.isStreaming = true;
         this.updateUI();
@@ -1856,7 +2507,7 @@ style.textContent = `
             opacity: 1;
         }
     }
-    
+
     @keyframes slideOut {
         from {
             transform: translateX(0);

@@ -3,8 +3,18 @@
 from typing import Any
 
 from langchain_openai import ChatOpenAI
+from openai import APIStatusError
 from app.config import config
-from loguru import logger
+
+
+def model_quota_exhausted(error: Exception) -> bool:
+    return isinstance(error, APIStatusError) and error.code == "insufficient_quota"
+
+
+def model_error_message(error: Exception) -> str:
+    if model_quota_exhausted(error):
+        return "千问 API 可用额度已用尽，请检查当前 API Key 对应账号的额度和计费设置。"
+    return str(error)
 
 
 class LLMFactory:

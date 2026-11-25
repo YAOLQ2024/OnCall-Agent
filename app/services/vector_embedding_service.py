@@ -24,6 +24,9 @@ class QwenEmbeddings(Embeddings):
         model: str,
         dimensions: int = 1024,
         base_url: str = "https://maas.qianwenaiapi.com/compatible-mode/v1",
+        *,
+        timeout: float | None = None,
+        max_retries: int | None = None,
     ):
         """
         初始化千问平台 Embeddings
@@ -36,10 +39,12 @@ class QwenEmbeddings(Embeddings):
         if not api_key or api_key == "your-api-key-here":
             raise ValueError("请设置环境变量 QWEN_API_KEY")
         
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        )
+        options = {}
+        if timeout is not None:
+            options["timeout"] = timeout
+        if max_retries is not None:
+            options["max_retries"] = max_retries
+        self.client = OpenAI(api_key=api_key, base_url=base_url, **options)
         self.model = model
         self.dimensions = dimensions
         

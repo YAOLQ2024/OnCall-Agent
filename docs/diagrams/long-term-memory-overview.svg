@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1520" height="1080" viewBox="0 0 1520 1080" role="img" aria-labelledby="title desc">
+<title id="title">OnCallAgent 长期记忆总体架构</title>
+<desc id="desc">现有认证与路由后，按需读取用户画像和已确认事故；通过运行时上下文注入RAG和AIOps。后台任务持久化、提取草稿、经用户确认后更新权威存储及独立索引。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#526477"/></marker></defs>
+<rect width="1520" height="1080" fill="#f8fafc"/>
+<style>text{font-family:"Microsoft YaHei","Noto Sans CJK SC","Segoe UI",sans-serif;fill:#203348} .title{font-size:29px;font-weight:700}.label{font-size:19px;font-weight:600}.small{font-size:15px}.note{font-size:17px;fill:#526477}</style>
+<text x="50" y="52" text-anchor="start" class="title">OnCallAgent 长期记忆｜设计 v0.1</text>
+<text x="50" y="84" text-anchor="start" class="note">个人画像 + 经确认的事故经验 + 按需召回 + 可恢复后台任务；设计稿，尚未实现</text>
+<rect x="30" y="110" width="1460" height="510" rx="18" fill="#eff6ff" stroke="#bfdbfe"/>
+<text x="55" y="142" text-anchor="start" class="label">请求内：先验证身份，按需使用记忆</text>
+<rect x="60" y="180" width="245" height="80" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="182.5" y="210" text-anchor="middle" class="label">登录 / 聊天 / 记忆中心</text>
+<text x="182.5" y="236" text-anchor="middle" class="small">复用现有 UI 与 authFetch</text>
+<rect x="350" y="180" width="235" height="80" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="467.5" y="210" text-anchor="middle" class="label">CurrentUser + Supervisor</text>
+<text x="467.5" y="236" text-anchor="middle" class="small">身份固定；先路由后按需召回</text>
+<rect x="640" y="180" width="240" height="80" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="760.0" y="210" text-anchor="middle" class="label">MemoryService</text>
+<text x="760.0" y="236" text-anchor="middle" class="small">本轮目标覆盖画像默认值</text>
+<rect x="935" y="170" width="245" height="80" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1057.5" y="200" text-anchor="middle" class="label">当前用户画像</text>
+<text x="1057.5" y="226" text-anchor="middle" class="small">SQLite · 手工编辑即时生效</text>
+<rect x="935" y="295" width="245" height="80" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1057.5" y="325" text-anchor="middle" class="label">事故召回与回表校验</text>
+<text x="1057.5" y="351" text-anchor="middle" class="small">只读 confirmed / 当前版本</text>
+<rect x="1220" y="280" width="235" height="65" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1337.5" y="310" text-anchor="middle" class="label">FTS5 / BM25</text>
+<text x="1337.5" y="336" text-anchor="middle" class="small">带归属和环境过滤</text>
+<rect x="1220" y="380" width="235" height="65" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1337.5" y="410" text-anchor="middle" class="label">独立 Milvus 集合</text>
+<text x="1337.5" y="436" text-anchor="middle" class="small">可选向量分支 / 可重建</text>
+<rect x="640" y="445" width="240" height="80" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="760.0" y="475" text-anchor="middle" class="label">有界参考视图</text>
+<text x="760.0" y="501" text-anchor="middle" class="small">带来源、版本、适用条件</text>
+<rect x="350" y="500" width="235" height="80" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="467.5" y="530" text-anchor="middle" class="label">RAG / AIOps / 普通聊天</text>
+<text x="467.5" y="556" text-anchor="middle" class="small">Runtime / 模型调用视图</text>
+<rect x="60" y="500" width="245" height="80" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="182.5" y="530" text-anchor="middle" class="label">回复与会话持久化</text>
+<text x="182.5" y="556" text-anchor="middle" class="small">不把参考块追加进 checkpoint</text>
+<polyline points="305,220 350,220" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<polyline points="585,220 640,220" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<polyline points="880,210 935,210" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<polyline points="880,238 905,238 905,335 935,335" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<polyline points="1180,320 1220,312" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<polyline points="1180,350 1200,350 1200,412 1220,412" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<polyline points="1057,250 1057,420 820,420 820,445" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<polyline points="1057,375 1057,425 850,425 850,445" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<polyline points="640,485 610,485 610,540 585,540" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<polyline points="350,540 305,540" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="85" y="400" text-anchor="start" class="note">固定规则与记忆数据分区</text>
+<text x="85" y="430" text-anchor="start" class="note">历史经验仅供参考，不自动执行旧命令</text>
+<rect x="30" y="650" width="1460" height="320" rx="18" fill="#f0fdf4" stroke="#bbf7d0"/>
+<text x="55" y="685" text-anchor="start" class="label">后台：任务先落盘，提取只生成建议，确认后才可召回</text>
+<rect x="60" y="735" width="245" height="85" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="182.5" y="765" text-anchor="middle" class="label">SQLite 持久任务</text>
+<text x="182.5" y="791" text-anchor="middle" class="small">幂等 / lease / 重试 / 预算</text>
+<rect x="350" y="735" width="235" height="85" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="467.5" y="765" text-anchor="middle" class="label">提取器</text>
+<text x="467.5" y="791" text-anchor="middle" class="small">受控输入；模型输出为草稿</text>
+<rect x="640" y="735" width="240" height="85" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="760.0" y="765" text-anchor="middle" class="label">用户确认 / 纠正 / 撤回</text>
+<text x="760.0" y="791" text-anchor="middle" class="small">状态机与 revision 校验</text>
+<rect x="935" y="735" width="245" height="85" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1057.5" y="765" text-anchor="middle" class="label">SQLite 权威记录</text>
+<text x="1057.5" y="791" text-anchor="middle" class="small">画像 / 事故 / generation</text>
+<rect x="1220" y="735" width="235" height="85" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+<text x="1337.5" y="765" text-anchor="middle" class="label">索引同步任务</text>
+<text x="1337.5" y="791" text-anchor="middle" class="small">FTS 同事务；向量最终一致</text>
+<polyline points="180,580 180,735" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="235" y="655" text-anchor="middle" class="small">轻量入队</text>
+<polyline points="305,778 350,778" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="7 5"/>
+<polyline points="585,778 640,778" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<polyline points="880,778 935,778" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)"/>
+<polyline points="1180,778 1220,778" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="7 5"/>
+<polyline points="1455,778 1470,778 1470,345 1455,345" fill="none" stroke="#526477" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="7 5"/>
+<text x="70" y="875" text-anchor="start" class="note">隔离：所有读取、写入、任务和删除均绑定服务端验证的 user_id。</text>
+<text x="70" y="909" text-anchor="start" class="note">一致性：回表复核状态与版本；遗忘后旧任务不复活；记忆失败不阻断原有问答。</text>
+<text x="50" y="1018" text-anchor="start" class="note">本期：SQLite + 现有 Milvus；不新增 Redis / Celery / Mem0 / Letta 运行框架。</text>
+<text x="50" y="1051" text-anchor="start" class="note">图中虚线表示后台处理或索引同步；性能、阈值和模型效果均需后续验收。</text>
+</svg>

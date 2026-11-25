@@ -10,10 +10,14 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from loguru import logger
 
+from langgraph.runtime import Runtime
+from app.models.memory_runtime import MemoryRunContext, memory_data_messages, memory_policy
+
 from app.config import config
-from app.core.llm_factory import llm_factory
+from app.core.llm_factory import llm_factory, model_quota_exhausted
 from app.tools import get_current_time, retrieve_knowledge
 from app.agent.mcp_client import mcp_registry
+from app.agent.compactor import SREToolOutputCompressor
 from .state import PlanExecuteState
 from .utils import format_tools_description
 
@@ -82,7 +86,7 @@ replanner_prompt = ChatPromptTemplate.from_messages(
 
                 **决策优先级口诀：** 
                 "优先结束 > 保持不变 > 调整计划"
-                "信息足够就响应，不要追求完美"
+                "信息足够就响应，不要追求完美"{memory_policy}
             """).strip(),
         ),
         ("placeholder", "{messages}"),
@@ -101,7 +105,7 @@ response_prompt = ChatPromptTemplate.from_messages(
                 - 清晰、结构化
                 - 基于实际数据，不要编造
                 - 如果某些步骤失败，要诚实说明
-                - 使用 Markdown 格式
+                - 使用 Markdown 格式{memory_policy}
             """).strip(),
         ),
         ("placeholder", "{messages}"),
@@ -109,7 +113,7 @@ response_prompt = ChatPromptTemplate.from_messages(
 )
 
 
-async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
+async def replanner(state: PlanExecuteState, runtime: Runtime[MemoryRunContext] | None = None) -> Dict[str, Any]:
     """
     重新规划节点：决定是继续、调整计划还是生成最终响应
 
@@ -120,6 +124,7 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
     """
     logger.info("=== Replanner：重新规划 ===")
 
+    memory = runtime.context if runtime else None
     input_text = state.get("input", "")
     plan = state.get("plan", [])
     past_steps = state.get("past_steps", [])
@@ -135,7 +140,7 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
             model=config.qwen_chat_model,
             temperature=0
         )
-        return await _generate_response(state, llm)
+        return await _generate_response(state, llm, memory)
 
     # 获取可用工具列表
     try:
@@ -164,11 +169,11 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
         temperature=0
     )
 
-    # 格式化已执行的步骤
-    steps_summary = "\n".join([
-        f"步骤: {step}\n结果: {result[:300]}..."
+    # 复判保留较长的步骤证据，超限时沿用日志首尾和异常窗口。
+    steps_summary = "\n".join(
+        f"步骤: {step}\n结果: {SREToolOutputCompressor.compress(result, max_chars=config.aiops_replan_step_max_chars)}"
         for step, result in past_steps
-    ])
+    )
 
     # 如果还有剩余计划，进行决策
     if plan:
@@ -178,6 +183,7 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
 
         try:
             messages = [
+                *memory_data_messages(memory),
                 ("user", f"原始任务: {input_text}"),
                 ("user", f"已执行的步骤:\n{steps_summary}"),
                 ("user", f"剩余计划: {', '.join(plan)}"),
@@ -186,7 +192,8 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
 
             act = await replanner_chain.ainvoke({
                 "messages": messages,
-                "tools_description": tools_description
+                "tools_description": tools_description,
+                "memory_policy": memory_policy(memory)
             })
 
             # 处理返回结果
@@ -202,7 +209,7 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
 
             if action == "respond":
                 logger.info("决定生成最终响应")
-                return await _generate_response(state, llm)
+                return await _generate_response(state, llm, memory)
 
             elif action == "replan":
                 # ⚠️ 强制限制：新步骤数不能超过当前剩余步骤数
@@ -216,7 +223,7 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
                 # ⚠️ 二次检查：如果已执行步骤 >= 5，禁止 replan
                 if len(past_steps) >= 5:
                     logger.warning(f"已执行 {len(past_steps)} 个步骤，禁止重新规划，强制生成响应")
-                    return await _generate_response(state, llm)
+                    return await _generate_response(state, llm, memory)
                 
                 logger.info(f"决定调整计划，新步骤数量: {len(new_steps)}")
                 if new_steps:
@@ -231,16 +238,19 @@ async def replanner(state: PlanExecuteState) -> Dict[str, Any]:
                 return {}  # 不修改状态，继续执行
 
         except Exception as e:
+            if model_quota_exhausted(e):
+                raise
             logger.error(f"重新规划失败: {e}, 继续执行剩余计划")
             return {}
 
     else:
         # 没有剩余计划，生成最终响应
         logger.info("计划已执行完毕，生成最终响应")
-        return await _generate_response(state, llm)
+        return await _generate_response(state, llm, memory)
 
 
-async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI) -> Dict[str, Any]:
+async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI,
+                             memory: MemoryRunContext | None = None) -> Dict[str, Any]:
     """生成最终响应"""
     logger.info("生成最终响应...")
 
@@ -257,12 +267,13 @@ async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI) -> Dict[s
 
     try:
         messages = [
+            *memory_data_messages(memory),
             ("user", f"原始任务: {input_text}"),
             ("user", f"执行历史:\n{execution_history}"),
             ("user", "请基于以上信息生成全面的最终响应")
         ]
 
-        response_obj = await response_gen.ainvoke({"messages": messages})
+        response_obj = await response_gen.ainvoke({"messages": messages, "memory_policy": memory_policy(memory)})
 
         # 处理返回结果
         if isinstance(response_obj, Response):
@@ -276,6 +287,8 @@ async def _generate_response(state: PlanExecuteState, llm: ChatOpenAI) -> Dict[s
         return {"response": final_response}
 
     except Exception as e:
+        if model_quota_exhausted(e):
+            raise
         logger.error(f"生成响应失败: {e}")
         # 生成简单的后备响应
         fallback_response = f"""# 任务执行结果

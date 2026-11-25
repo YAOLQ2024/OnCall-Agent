@@ -5,12 +5,15 @@
 
 from pydantic import BaseModel, Field
 
+from app.models.memory import MemoryScope
+
 
 class ChatRequest(BaseModel):
     """对话请求"""
 
     id: str = Field(..., description="会话 ID", alias="Id")
     question: str = Field(..., description="用户问题", alias="Question")
+    memory_scope: MemoryScope | None = None
 
     class Config:
         populate_by_name = True

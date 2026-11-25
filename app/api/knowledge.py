@@ -15,7 +15,7 @@ class HistoryMessage(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=4000)
+    content: str = Field(min_length=1, max_length=32_000)
 
 
 class KnowledgeSearchRequest(BaseModel):
@@ -23,7 +23,7 @@ class KnowledgeSearchRequest(BaseModel):
 
     query: str = Field(min_length=1, max_length=4000, description="检索问题")
     top_k: int | None = Field(default=None, ge=1, le=100, description="每路子文档上限；最终父文档最多 RAG_RERANK_TOP_N 篇")
-    chat_history: list[HistoryMessage] = Field(default_factory=list, max_length=20)
+    chat_history: list[HistoryMessage] = Field(default_factory=list, max_length=64)
 
 
 @router.post("/knowledge/search")

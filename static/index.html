@@ -3,37 +3,230 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智能OnCall助手</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    <title>OnCall Agent · 智能运维工作台</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20261110_02">
     <!-- Markdown 渲染库 -->
     <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
-    <!-- 代码高亮库（可选） -->
+    <!-- 代码高亮库（清爽亮色主题） -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css">
     <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/es/highlight.min.js"></script>
 </head>
 <body>
+    <!-- 企业级 SRE 运维应急中台登录页 -->
+    <div id="loginOverlay" class="login-overlay">
+        <div class="login-bg-grid"></div>
+        <div class="login-card">
+            <div class="login-brand">
+                <div class="login-logo-badge">
+                    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <defs>
+                            <linearGradient id="brand-grad-1" x1="6" y1="8" x2="22" y2="16" gradientUnits="userSpaceOnUse">
+                                <stop offset="0%" stop-color="#38bdf8" />
+                                <stop offset="60%" stop-color="#818cf8" />
+                                <stop offset="100%" stop-color="#c084fc" />
+                            </linearGradient>
+                            <linearGradient id="brand-grad-2" x1="26" y1="24" x2="10" y2="16" gradientUnits="userSpaceOnUse">
+                                <stop offset="0%" stop-color="#c084fc" />
+                                <stop offset="60%" stop-color="#818cf8" />
+                                <stop offset="100%" stop-color="#38bdf8" />
+                            </linearGradient>
+                        </defs>
+                        <path d="M 6 8 C 11 5 19 6 22 10.5 C 24 13.5 22.5 16.5 19 16.5" stroke="url(#brand-grad-1)" stroke-width="2.5" stroke-linecap="round"/>
+                        <circle cx="6" cy="8" r="2.2" fill="#38bdf8"/>
+                        <circle cx="19" cy="16.5" r="2" fill="#a855f7"/>
+                        <path d="M 26 24 C 21 27 13 26 10 21.5 C 8 18.5 9.5 15.5 13 15.5" stroke="url(#brand-grad-2)" stroke-width="2.5" stroke-linecap="round"/>
+                        <circle cx="26" cy="24" r="2.2" fill="#c084fc"/>
+                        <circle cx="13" cy="15.5" r="2" fill="#818cf8"/>
+                        <circle cx="16" cy="16" r="2.2" fill="#ffffff"/>
+                        <path d="M 16 12 L 17 14.5 L 20 16 L 17 17.5 L 16 20 L 15 17.5 L 12 16 L 15 14.5 Z" fill="#ffffff" opacity="0.95"/>
+                    </svg>
+                </div>
+                <h1 class="login-title">CloudOps 智能 OnCall 应急中台</h1>
+                <p class="login-subtitle">多租户会话隔离 · 状态机持久化 · 根因诊断引擎</p>
+            </div>
+
+            <form id="loginForm" class="login-form" autocomplete="on">
+                <div class="login-field">
+                    <label for="loginUsername">运维账号 / 用户名</label>
+                    <div class="login-input-wrap">
+                        <svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                            <circle cx="12" cy="7" r="4"/>
+                        </svg>
+                        <input
+                            type="text"
+                            id="loginUsername"
+                            name="username"
+                            placeholder="输入 alice / bob / admin"
+                            value="alice"
+                            required
+                            autocomplete="username"
+                        >
+                    </div>
+                </div>
+
+                <div class="login-field">
+                    <label for="loginPassword">安全密码 <span class="pwd-hint">(演示密码: 123456)</span></label>
+                    <div class="login-input-wrap">
+                        <svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                        </svg>
+                        <input
+                            type="password"
+                            id="loginPassword"
+                            name="password"
+                            placeholder="请输入登录密码"
+                            value="123456"
+                            required
+                            autocomplete="current-password"
+                        >
+                    </div>
+                </div>
+
+                <div id="loginError" class="login-error" role="alert" hidden></div>
+
+                <button type="submit" id="loginSubmitBtn" class="login-submit-btn">
+                    <span>登录进入排障指挥中心</span>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="5" y1="12" x2="19" y2="12"/>
+                        <polyline points="12 5 19 12 12 19"/>
+                    </svg>
+                </button>
+            </form>
+
+            <div class="quick-login-divider">
+                <span>或 点击企业预置身份一键快捷登录</span>
+            </div>
+
+            <div class="quick-role-grid" id="quickRoleGrid">
+                <button type="button" class="quick-role-card active" data-username="alice" data-password="123456">
+                    <span class="quick-role-avatar">👩‍💻</span>
+                    <div class="quick-role-info">
+                        <div class="quick-role-top">
+                            <span class="quick-role-name">Alice</span>
+                            <span class="quick-role-tag tag-sre">SRE 专家</span>
+                        </div>
+                        <span class="quick-role-dept">基础设施与稳定性运维部</span>
+                    </div>
+                </button>
+
+                <button type="button" class="quick-role-card" data-username="bob" data-password="123456">
+                    <span class="quick-role-avatar">👨‍💻</span>
+                    <div class="quick-role-info">
+                        <div class="quick-role-top">
+                            <span class="quick-role-name">Bob</span>
+                            <span class="quick-role-tag tag-dev">业务研发</span>
+                        </div>
+                        <span class="quick-role-dept">核心业务研发中心</span>
+                    </div>
+                </button>
+
+                <button type="button" class="quick-role-card" data-username="admin" data-password="123456">
+                    <span class="quick-role-avatar">🛡️</span>
+                    <div class="quick-role-info">
+                        <div class="quick-role-top">
+                            <span class="quick-role-name">Admin</span>
+                            <span class="quick-role-tag tag-admin">系统主管</span>
+                        </div>
+                        <span class="quick-role-dept">技术保障委员会</span>
+                    </div>
+                </button>
+            </div>
+
+            <div class="login-security-footer">
+                <span>🔒 HS256 JWT 无状态鉴权</span>
+                <span>·</span>
+                <span>🛡️ RBAC 租户级会话隔离</span>
+                <span>·</span>
+                <span>💾 Checkpoint 持久化</span>
+            </div>
+        </div>
+    </div>
+
     <div class="app-layout">
         <!-- 左侧边栏 -->
         <aside class="sidebar">
             <div class="sidebar-header">
-                <h2 class="sidebar-title">智能OnCall助手</h2>
+                <div class="sidebar-brand">
+                    <div class="sidebar-brand-icon">
+                        <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <defs>
+                                <linearGradient id="side-grad-1" x1="6" y1="8" x2="22" y2="16" gradientUnits="userSpaceOnUse">
+                                    <stop offset="0%" stop-color="#38bdf8" />
+                                    <stop offset="60%" stop-color="#818cf8" />
+                                    <stop offset="100%" stop-color="#c084fc" />
+                                </linearGradient>
+                                <linearGradient id="side-grad-2" x1="26" y1="24" x2="10" y2="16" gradientUnits="userSpaceOnUse">
+                                    <stop offset="0%" stop-color="#c084fc" />
+                                    <stop offset="60%" stop-color="#818cf8" />
+                                    <stop offset="100%" stop-color="#38bdf8" />
+                                </linearGradient>
+                            </defs>
+                            <path d="M 6 8 C 11 5 19 6 22 10.5 C 24 13.5 22.5 16.5 19 16.5" stroke="url(#side-grad-1)" stroke-width="2.5" stroke-linecap="round"/>
+                            <circle cx="6" cy="8" r="2.2" fill="#38bdf8"/>
+                            <circle cx="19" cy="16.5" r="2" fill="#a855f7"/>
+                            <path d="M 26 24 C 21 27 13 26 10 21.5 C 8 18.5 9.5 15.5 13 15.5" stroke="url(#side-grad-2)" stroke-width="2.5" stroke-linecap="round"/>
+                            <circle cx="26" cy="24" r="2.2" fill="#c084fc"/>
+                            <circle cx="13" cy="15.5" r="2" fill="#818cf8"/>
+                            <circle cx="16" cy="16" r="2.2" fill="#ffffff"/>
+                            <path d="M 16 12 L 17 14.5 L 20 16 L 17 17.5 L 16 20 L 15 17.5 L 12 16 L 15 14.5 Z" fill="#ffffff" opacity="0.95"/>
+                        </svg>
+                    </div>
+                    <div class="sidebar-brand-text">
+                        <h2 class="sidebar-title">CloudOps Nexus</h2>
+                        <span class="sidebar-subtitle">SRE Autonomous Agent</span>
+                    </div>
+                    <span class="sidebar-pro-tag">PRO</span>
+                </div>
+
+                <div class="user-profile-bar" id="userProfileBar">
+                    <span class="user-avatar" id="userAvatar">👩‍💻</span>
+                    <div class="user-meta">
+                        <div class="user-name-row">
+                            <span class="user-name" id="userName">Alice</span>
+                            <span class="user-badge" id="userRoleBadge">SRE</span>
+                        </div>
+                        <span class="user-dept" id="userDept">基础设施与稳定性运维部</span>
+                    </div>
+                    <button type="button" class="user-logout-btn" id="logoutBtn" title="退出登录 / 切换账号">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                            <polyline points="16 17 21 12 16 7"/>
+                            <line x1="21" y1="12" x2="9" y2="12"/>
+                        </svg>
+                    </button>
+                </div>
             </div>
             
             <div class="sidebar-content">
                 <button class="new-chat-btn" id="newChatBtn">
                     <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M12 5V19M5 12H19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <path d="M12 5V19M5 12H19" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
                     </svg>
-                    <span>新建对话</span>
+                    <span>新建排障会话</span>
                 </button>
                 <button class="sidebar-btn" id="knowledgeBtn" type="button" aria-haspopup="dialog" aria-controls="knowledgeDialog">
                     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
                         <path d="M4 4H10L12 6L14 4H20V20H14L12 22L10 20H4V4ZM12 6V22" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
                     </svg>
-                    <span>知识库</span>
+                    <span>运维知识库引擎</span>
+                </button>
+                <button class="sidebar-btn" id="memoryBtn" type="button" aria-haspopup="dialog" aria-controls="memoryDialog">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M9 4H6A2 2 0 0 0 4 6V18A2 2 0 0 0 6 20H18A2 2 0 0 0 20 18V6A2 2 0 0 0 18 4H15M9 4V8H15V4M8 13H16M8 16H13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span>长期记忆</span>
+                </button>
+                <button class="sidebar-btn" id="mcpConfigBtn" type="button" aria-haspopup="dialog" aria-controls="mcpConfigDialog">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
+                    </svg>
+                    <span>MCP 工具管理</span>
                 </button>
                 <details class="tool-status-panel" id="toolStatusPanel">
-                    <summary>MCP 工具状态 <span id="toolStatusSummary" role="status" aria-live="polite">检测中</span></summary>
+                    <summary>MCP 探针状态 <span id="toolStatusSummary" role="status" aria-live="polite">检测中</span></summary>
                     <p>知识库问答不依赖 MCP，部分工具不可用时也可继续提问。</p>
                     <div id="toolStatusList"></div>
                     <button id="refreshToolsBtn" type="button">重新检测工具</button>
@@ -42,81 +235,147 @@
                 
                 <div class="chat-history-section">
                     <div class="history-header">
-                        <span>近期对话</span>
+                        <span>历史排障工单与会话</span>
                     </div>
                     <div class="chat-history-list" id="chatHistoryList">
                         <!-- 历史对话列表将在这里动态生成 -->
                     </div>
                 </div>
-                
             </div>
         </aside>
 
         <!-- 主内容区域 -->
         <main class="main-content">
-            <button class="ai-ops-top-btn" id="aiOpsSidebarBtn">
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <span>AI Ops</span>
-            </button>
+            <div class="ambient-glow glow-top-right"></div>
+            <div class="ambient-glow glow-bottom-left"></div>
+
+            <!-- 顶部系统遥测状态栏 -->
+            <header class="workspace-topbar">
+                <div class="topbar-left">
+                    <span class="status-pulse-dot"></span>
+                    <span class="topbar-cluster-label">PROD-K8S-CLUSTER · ONLINE</span>
+                </div>
+                <div class="topbar-pills">
+                    <span class="arch-pill"><span class="pill-icon">🎯</span> 1+2+3 漏斗路由</span>
+                    <span class="arch-pill"><span class="pill-icon">🧬</span> 父子双层 RAG</span>
+                    <span class="arch-pill"><span class="pill-icon">✂️</span> 三级上下文压缩</span>
+                    <span class="arch-pill"><span class="pill-icon">🛡️</span> JWT 租户隔离</span>
+                </div>
+            </header>
+
             <div class="chat-container">
                 <div class="welcome-greeting" id="welcomeGreeting">
-                    <p>你好！我是智能Oncall小助手</p>
+                    <div class="hero-emblem">
+                        <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <defs>
+                                <linearGradient id="hero-grad-1" x1="4" y1="4" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+                                    <stop offset="0%" stop-color="#38bdf8" />
+                                    <stop offset="50%" stop-color="#6366f1" />
+                                    <stop offset="100%" stop-color="#c084fc" />
+                                </linearGradient>
+                            </defs>
+                            <rect x="3" y="3" width="26" height="26" rx="8" stroke="url(#hero-grad-1)" stroke-width="2" fill="rgba(99, 102, 241, 0.05)"/>
+                            <path d="M12 10L20 10M12 16L20 16M12 22L17 22" stroke="url(#hero-grad-1)" stroke-width="2" stroke-linecap="round"/>
+                            <circle cx="8" cy="10" r="1.5" fill="#38bdf8"/>
+                            <circle cx="8" cy="16" r="1.5" fill="#818cf8"/>
+                            <circle cx="8" cy="22" r="1.5" fill="#c084fc"/>
+                            <circle cx="23" cy="21" r="3.5" fill="none" stroke="#38bdf8" stroke-width="1.8"/>
+                            <path d="M23 19.5V22.5M21.5 21H24.5" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round"/>
+                        </svg>
+                    </div>
+                    <h1 class="hero-title">CloudOps 智能 OnCall 应急指挥中枢</h1>
+                    <p class="hero-subtitle">融合毫秒级语义漏斗路由、父子文档高精召回与 ReAct 多工具协同的智能 SRE 排障工作台</p>
+
+                    <div class="scenario-cards-grid" id="scenarioCardsGrid">
+                        <button type="button" class="scenario-card" data-prompt="当前线上核心网关出现大量 502 Bad Gateway 报错，请立即帮我排查根因">
+                            <div class="scenario-card-head">
+                                <span class="scenario-icon">🚨</span>
+                                <span class="scenario-tag tag-danger">AIOps 实时诊断</span>
+                            </div>
+                            <div class="scenario-card-title">线上网关 502 / 504 突发告警</div>
+                            <div class="scenario-card-desc">自动调取监控指标、容器状态与错误日志定位根因</div>
+                        </button>
+
+                        <button type="button" class="scenario-card" data-prompt="支付服务的 Pod 持续处于 CrashLoopBackOff 状态且伴随 OOMKilled，如何定位和修复？">
+                            <div class="scenario-card-head">
+                                <span class="scenario-icon">☸️</span>
+                                <span class="scenario-tag tag-cyan">K8s 排障 SOP</span>
+                            </div>
+                            <div class="scenario-card-title">Pod CrashLoopBackOff 与 OOM</div>
+                            <div class="scenario-card-desc">检索生产级 K8s 排障手册与容器内存溢出处置流程</div>
+                        </button>
+
+                        <button type="button" class="scenario-card" data-prompt="线上 MySQL 实例 CPU 突然飙升到 100%，活跃连接数打满，标准应急处置步骤是什么？">
+                            <div class="scenario-card-head">
+                                <span class="scenario-icon">📈</span>
+                                <span class="scenario-tag tag-purple">数据库应急</span>
+                            </div>
+                            <div class="scenario-card-title">MySQL CPU 100% 与连接池打满</div>
+                            <div class="scenario-card-desc">快速定位慢查询锁等待、高并发长事务与限流降级方案</div>
+                        </button>
+
+                        <button type="button" class="scenario-card" data-prompt="你好！请介绍一下你能帮 SRE 运维工程师处理哪些故障场景？">
+                            <div class="scenario-card-head">
+                                <span class="scenario-icon">🛡️</span>
+                                <span class="scenario-tag tag-emerald">能力自检</span>
+                            </div>
+                            <div class="scenario-card-title">探索 OnCall Agent 核心架构</div>
+                            <div class="scenario-card-desc">了解多智能体协同分工、工具生态与应急响应全链路</div>
+                        </button>
+                    </div>
                 </div>
+
                 <div class="chat-messages" id="chatMessages">
                 </div>
                 
                 <div class="chat-input-container">
                     <div class="input-group-wrapper">
                         <div class="input-wrapper">
-                            <input type="text" id="messageInput" placeholder="问问智能OnCall助手" maxlength="1000" class="message-input">
+                            <textarea id="messageInput" rows="1" placeholder="输入告警信息、报错日志、K8s 命令或运维排障问题 (Enter 发送)..." class="message-input"></textarea>
                             <div class="input-bottom-bar">
                                 <div class="tools-btn-wrapper">
-                                    <button class="tools-btn" id="toolsBtn" title="更多选项">
+                                    <button class="tools-btn" id="toolsBtn" title="上传运维文档与扩展工具">
                                         <svg class="tools-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                            <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
-                                            <circle cx="19" cy="12" r="1.5" fill="currentColor"/>
-                                            <circle cx="5" cy="12" r="1.5" fill="currentColor"/>
+                                            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                                         </svg>
+                                        <span class="tools-btn-label">挂载知识文档</span>
                                     </button>
                                     <div class="tools-menu" id="toolsMenu">
                                         <div class="tools-menu-item" id="uploadFileItem">
                                             <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                                             </svg>
-                                            <span>上传文件</span>
+                                            <span>上传 .md / .txt 文档构建父子索引</span>
                                         </div>
                                     </div>
                                 </div>
                                 <div class="right-actions">
                                     <div class="mode-selector-wrapper">
                                         <button class="mode-selector-btn" id="modeSelectorBtn">
-                                            <span id="currentModeText">快速</span>
+                                            <span class="mode-dot"></span>
+                                            <span id="currentModeText">流式</span>
                                             <svg class="dropdown-arrow" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                                 <path d="M6 9L12 15L18 9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                                             </svg>
                                         </button>
                                         <div class="mode-dropdown" id="modeDropdown">
-                                            <div class="dropdown-header">选择对话方式</div>
-                                            <div class="dropdown-item active" data-mode="quick">
+                                            <div class="dropdown-header">选择执行引擎模式</div>
+                                            <div class="dropdown-item active" data-mode="stream">
                                                 <div class="dropdown-item-main">
-                                                    <span>快速</span>
-                                                    <span class="badge-new">新</span>
+                                                    <span>🌊 流式推演</span>
+                                                    <span class="badge-new">推荐</span>
                                                 </div>
-                                                <div class="dropdown-item-sub">快速对话</div>
+                                                <div class="dropdown-item-sub">实时展示路由决策、工具调用与思考折叠</div>
                                             </div>
-                                            <div class="dropdown-item" data-mode="stream">
+                                            <div class="dropdown-item" data-mode="quick">
                                                 <div class="dropdown-item-main">
-                                                    <span>流式</span>
+                                                    <span>⚡ 快速直出</span>
                                                 </div>
-                                                <div class="dropdown-item-sub">流式对话</div>
+                                                <div class="dropdown-item-sub">聚合完整诊断结论一次性返回</div>
                                             </div>
                                         </div>
                                     </div>
-                                    <button class="send-btn-circle" id="sendButton" title="发送">
+                                    <button class="send-btn-circle" id="sendButton" title="发送排障指令">
                                         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                             <path d="M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                                         </svg>
@@ -164,6 +423,261 @@
         </div>
     </dialog>
 
+    <dialog id="memoryDialog" class="knowledge-dialog memory-dialog" aria-labelledby="memoryTitle">
+        <div class="knowledge-header">
+            <h2 id="memoryTitle">长期记忆</h2>
+            <button id="closeMemoryBtn" class="knowledge-close" type="button" aria-label="关闭长期记忆">×</button>
+        </div>
+        <div class="knowledge-body">
+            <nav class="memory-profile-actions memory-navigation" aria-label="长期记忆类别">
+                <button id="memoryProfileTab" class="memory-profile-secondary" type="button" aria-pressed="true" aria-controls="memoryProfilePane">个人画像</button>
+                <button id="memoryIncidentTab" class="memory-profile-secondary" type="button" aria-pressed="false" aria-controls="memoryIncidentPane">事故经验</button>
+                <button id="memoryJobsTab" class="memory-profile-secondary" type="button" aria-pressed="false" aria-controls="memoryJobsPane">任务状态</button>
+            </nav>
+            <div id="memoryProfilePane">
+                <section class="knowledge-section" aria-labelledby="memoryProfileHeading">
+                    <h3 id="memoryProfileHeading">当前账号的个人画像</h3>
+                    <p id="memoryProfileOwner"></p>
+                    <p id="memoryHelp">服务端开启长期记忆后，可选择在聊天中使用画像与事故经验。环境默认值需要本轮核实，删除聊天时保留手动保存的画像。</p>
+                    <form id="memoryProfileForm">
+                        <fieldset id="memoryProfileFields" class="memory-profile-fields" disabled>
+                            <legend class="memory-profile-legend">输出偏好与环境默认值</legend>
+                            <div class="memory-profile-grid">
+                                <div><label for="memoryLanguage">语言代码</label><input id="memoryLanguage" type="text" maxlength="32" placeholder="例如 zh-CN 或 en" autocomplete="off"></div>
+                                <div><label for="memoryDetail">回答详细程度</label><select id="memoryDetail"><option value="">未设置</option><option value="concise">简洁</option><option value="normal">常规</option><option value="detailed">详细</option></select></div>
+                                <div><label for="memoryOutputOrder">输出顺序</label><select id="memoryOutputOrder"><option value="">未设置</option><option value="summary_first">先结论，后解释</option><option value="steps_first">先步骤，后解释</option></select></div>
+                                <div><label for="memoryCluster">默认集群</label><input id="memoryCluster" type="text" maxlength="128" placeholder="例如 cluster-a" autocomplete="off"></div>
+                                <div><label for="memoryEnvironment">默认环境</label><input id="memoryEnvironment" type="text" maxlength="128" placeholder="例如 production 或 staging" autocomplete="off"></div>
+                                <div><label for="memoryNamespace">默认命名空间</label><input id="memoryNamespace" type="text" maxlength="63" placeholder="例如 prod-pay" autocomplete="off"></div>
+                            </div>
+                            <label for="memoryServices">负责的服务</label>
+                            <input id="memoryServices" type="text" maxlength="6500" placeholder="例如 payment-gateway, redis-cluster（最多 50 项）" autocomplete="off">
+                            <label for="memoryResponsePreferences">自然语言回答偏好</label>
+                            <textarea id="memoryResponsePreferences" rows="3" aria-describedby="memoryResponsePreferencesHelp" placeholder="例如：英文术语旁附上中文翻译"></textarea>
+                            <p id="memoryResponsePreferencesHelp">每行一条，最多 50 条，每条最多 500 字符。保存后可在新对话使用。</p>
+                            <label class="memory-profile-toggle" for="memoryUseEnabled"><input id="memoryUseEnabled" type="checkbox">允许在聊天中使用长期记忆</label>
+                            <label class="memory-profile-toggle" for="memoryAutoExtract"><input id="memoryAutoExtract" type="checkbox">允许从完成的对话生成待审核建议</label>
+                            <p id="memoryAutoHelp"></p>
+                            <p>字段留空后保存即可删除该字段；服务列表整体替换。这里只保存你明确填写的设置，不会自动记录本轮临时要求。</p>
+                        </fieldset>
+                        <div class="memory-profile-actions">
+                            <button id="memorySaveBtn" class="knowledge-primary" type="submit" disabled>保存画像</button>
+                            <button id="memoryClearBtn" class="memory-profile-secondary" type="button" disabled>清空字段</button>
+                            <button id="memoryReloadBtn" class="memory-profile-secondary" type="button" title="重新加载会丢弃未保存的修改">重新加载</button>
+                        </div>
+                    </form>
+                </section>
+                <section id="memoryProfileStatus" class="knowledge-result" role="status" aria-live="polite" aria-atomic="true"><p id="memoryProfileStatusText">尚未加载画像。</p></section>
+            </div>
+            <section id="memoryIncidentPane" class="knowledge-section" aria-label="事故经验" hidden>
+                <div id="memoryIncidentBrowse">
+                    <h3>当前账号的事故经验</h3>
+                    <p>仅已确认且有效的事故可通过词法搜索找到。聊天只参考当前账号中与本轮目标匹配的事故。删除来源会话会同时撤回关联事故。</p>
+                    <div class="memory-profile-actions">
+                        <button id="memoryIncidentNew" class="knowledge-primary" type="button">新建草稿</button>
+                        <button id="memoryIncidentAll" class="memory-profile-secondary" type="button">重新加载列表</button>
+                    </div>
+                    <label for="memoryIncidentFilter">按状态浏览</label>
+                    <select id="memoryIncidentFilter">
+                        <option value="">全部状态</option><option value="draft">待确认</option><option value="confirmed">已确认</option>
+                        <option value="invalidated">已失效</option><option value="withdrawn">已撤回</option>
+                    </select>
+                    <form id="memoryIncidentSearch" class="memory-incident-search">
+                        <div><label for="memoryIncidentQuery">搜索已确认事故</label><input id="memoryIncidentQuery" type="text" maxlength="200" required placeholder="例如 连接池、pay-api 或 ERR-503" autocomplete="off"></div>
+                        <button class="memory-profile-secondary" type="submit">搜索</button>
+                    </form>
+                    <ul id="memoryIncidentList" class="memory-incident-list"></ul>
+                    <button id="memoryIncidentMore" class="memory-profile-secondary" type="button" hidden>加载更多</button>
+                </div>
+                <div id="memoryIncidentEditor" hidden>
+                    <div class="memory-profile-actions">
+                        <button id="memoryIncidentBack" class="memory-profile-secondary" type="button">返回列表</button>
+                        <button id="memoryIncidentReload" class="memory-profile-secondary" type="button" title="重新加载会丢弃未保存的输入">重新加载记录</button>
+                    </div>
+                    <h3 id="memoryIncidentHeading">新建事故草稿</h3>
+                    <p id="memoryIncidentMeta"></p>
+                    <form id="memoryIncidentForm">
+                        <fieldset id="memoryIncidentFields" class="memory-profile-fields">
+                            <label for="incidentTitle">标题</label><input id="incidentTitle" name="title" type="text" maxlength="240" required>
+                            <label for="incidentSymptoms">症状</label><textarea id="incidentSymptoms" name="symptoms" maxlength="2400" rows="2"></textarea>
+                            <div class="memory-profile-grid">
+                                <div><label for="incidentServices">目标服务（逗号分隔）</label><input id="incidentServices" name="services" type="text" maxlength="6500"></div>
+                                <div><label for="incidentErrors">错误码（逗号分隔）</label><input id="incidentErrors" name="error_codes" type="text" maxlength="3900"></div>
+                                <div><label for="incidentEnvironment">适用环境</label><input id="incidentEnvironment" name="environment" type="text" maxlength="128" placeholder="例如 production"></div>
+                                <div><label for="incidentCluster">集群</label><input id="incidentCluster" name="cluster" type="text" maxlength="128"></div>
+                                <div><label for="incidentNamespace">命名空间</label><input id="incidentNamespace" name="namespace" type="text" maxlength="63"></div>
+                                <div><label for="incidentVersions">适用版本</label><input id="incidentVersions" name="version_constraints" type="text" maxlength="240"></div>
+                                <div><label for="incidentOccurred">发生时间（本地）</label><input id="incidentOccurred" name="occurred_at" type="datetime-local" step="0.001"></div>
+                                <div><label for="incidentExpires">有效期至（本地）</label><input id="incidentExpires" name="expires_at" type="datetime-local" step="0.001"></div>
+                            </div>
+                            <details class="memory-incident-details">
+                                <summary>诊断过程与复盘</summary>
+                                <label for="incidentDiagnostics">诊断动作与证据摘要</label><textarea id="incidentDiagnostics" name="diagnostic_actions" maxlength="2400" rows="2"></textarea>
+                                <label for="incidentExcluded">已排除假设与证据摘要</label><textarea id="incidentExcluded" name="excluded_hypotheses" maxlength="2400" rows="2"></textarea>
+                                <label for="incidentRoot">根因（未知时留空）</label><textarea id="incidentRoot" name="root_cause" maxlength="2400" rows="2"></textarea>
+                                <label for="incidentActions">采取的操作</label><textarea id="incidentActions" name="actions_taken" maxlength="2400" rows="2"></textarea>
+                                <label for="incidentLessons">复盘结论</label><textarea id="incidentLessons" name="lessons" maxlength="2400" rows="2"></textarea>
+                            </details>
+                            <details id="memoryIncidentSource" class="memory-incident-details">
+                                <summary>来源会话与恢复证据</summary>
+                                <label for="incidentSession">来源会话</label><select id="incidentSession" name="source_session_id"><option value="">无关联会话</option></select>
+                                <button id="memoryIncidentMessages" class="memory-profile-secondary" type="button">查看最近消息编号</button>
+                                <div id="memoryIncidentMessageList" class="memory-incident-messages" hidden></div>
+                                <label for="incidentMessageIds">来源消息编号（逗号分隔）</label><input id="incidentMessageIds" name="source_message_ids" type="text" maxlength="850">
+                                <label for="incidentRecovery">恢复证据摘要</label><textarea id="incidentRecovery" name="recovery_summary" maxlength="2400" rows="2"></textarea>
+                                <label for="incidentRecoveryUrl">监控或复盘链接（HTTP/HTTPS）</label><input id="incidentRecoveryUrl" name="recovery_url" type="text" maxlength="2083">
+                                <label for="incidentRecoveryIds">恢复证据消息编号（须在来源消息内）</label><input id="incidentRecoveryIds" name="recovery_ids" type="text" maxlength="850">
+                            </details>
+                            <button id="memoryIncidentSave" class="knowledge-primary" type="submit">保存草稿</button>
+                        </fieldset>
+                    </form>
+                    <div id="memoryIncidentActions" hidden>
+                        <details id="memoryIncidentConfirmation" class="memory-incident-details" hidden>
+                            <summary>确认事故</summary>
+                            <p>先保存修改。确认已恢复需要保存恢复证据摘要及链接或来源消息。</p>
+                            <div class="memory-profile-actions">
+                                <button id="memoryIncidentUnresolved" class="memory-profile-secondary" type="button">确认 · 未解决</button>
+                                <button id="memoryIncidentResolved" class="knowledge-primary" type="button">确认 · 已恢复</button>
+                            </div>
+                        </details>
+                        <details id="memoryIncidentInvalidation" class="memory-incident-details" hidden>
+                            <summary>标记失效</summary>
+                            <form id="memoryIncidentInvalidateForm">
+                                <label for="incidentInvalidateReason">失效原因</label><input id="incidentInvalidateReason" type="text" maxlength="240" required>
+                                <button id="memoryIncidentInvalidate" class="memory-profile-secondary" type="submit">确认失效</button>
+                            </form>
+                        </details>
+                        <details id="memoryIncidentWithdrawal" class="memory-incident-details">
+                            <summary>撤回事故</summary>
+                            <p>撤回将清除正文和证据，并从词法索引移除。</p>
+                            <button id="memoryIncidentWithdraw" class="memory-profile-secondary" type="button">确认撤回</button>
+                        </details>
+                    </div>
+                </div>
+                <section id="memoryIncidentStatus" class="knowledge-result" role="status" aria-live="polite" aria-atomic="true"><p></p></section>
+            </section>
+            <section id="memoryJobsPane" class="knowledge-section" aria-label="记忆任务" hidden>
+                <h3>提取与索引任务</h3>
+                <p>画像建议和事故提议由你审核。事故保存为草稿后可在「事故经验」核实并确认。</p>
+                <details class="memory-incident-details">
+                    <summary>从已有会话提炼事故</summary>
+                    <label for="memoryJobSession">选择会话</label>
+                    <select id="memoryJobSession"><option value="">请选择</option></select>
+                    <p>使用该会话中截至最近一条已完成回复的至多 12 条消息。</p>
+                    <button id="memoryJobSubmit" class="knowledge-primary" type="button" disabled>生成事故提议</button>
+                </details>
+                <p id="memoryJobUsage"></p>
+                <div class="memory-profile-actions">
+                    <button id="memoryJobRefresh" class="memory-profile-secondary" type="button">刷新任务</button>
+                    <button id="memoryJobMore" class="memory-profile-secondary" type="button" hidden>加载更多</button>
+                </div>
+                <ul id="memoryJobList" class="memory-incident-list"></ul>
+                <div id="memoryJobDetail" class="knowledge-result" hidden>
+                    <h3 id="memoryJobHeading"></h3>
+                    <div id="memoryJobProposal"></div>
+                    <div class="memory-profile-actions">
+                        <button id="memoryJobApply" class="knowledge-primary" type="button" hidden>应用建议</button>
+                        <button id="memoryJobDismiss" class="memory-profile-secondary" type="button" hidden>忽略建议</button>
+                        <button id="memoryJobRetry" class="memory-profile-secondary" type="button" hidden>重试任务</button>
+                    </div>
+                </div>
+                <details id="memoryForgetSection" class="memory-incident-details">
+                    <summary>遗忘全部</summary>
+                    <form id="memoryForgetForm">
+                        <p>清空本账号的长期画像、事故正文和待审核建议。聊天记录在会话列表中单独管理。</p>
+                        <label class="memory-profile-toggle" for="memoryForgetCheck"><input id="memoryForgetCheck" type="checkbox" required>确认清除当前账号的长期记忆</label>
+                        <button id="memoryForgetSubmit" class="memory-profile-secondary" type="submit">清除长期记忆</button>
+                    </form>
+                </details>
+                <div id="memoryJobStatus" class="knowledge-result" role="status" aria-live="polite"><p></p></div>
+            </section>
+        </div>
+    </dialog>
+
+    <!-- MCP 工具管理弹窗 -->
+    <dialog id="mcpConfigDialog" class="knowledge-dialog mcp-dialog" aria-labelledby="mcpConfigTitle">
+        <div class="knowledge-header">
+            <h2 id="mcpConfigTitle">MCP 探针与工具中心</h2>
+            <button id="closeMcpConfigBtn" class="knowledge-close" type="button" aria-label="关闭 MCP 管理">×</button>
+        </div>
+        <div class="knowledge-body">
+            <nav class="memory-profile-actions memory-navigation mcp-navigation" aria-label="MCP 功能类别">
+                <button id="mcpServersTab" class="memory-profile-secondary" type="button" aria-pressed="true" aria-controls="mcpServersPane">已挂载服务</button>
+                <button id="mcpAddTab" class="memory-profile-secondary" type="button" aria-pressed="false" aria-controls="mcpAddPane">+ 添加新探针</button>
+                <button id="mcpJsonTab" class="memory-profile-secondary" type="button" aria-pressed="false" aria-controls="mcpJsonPane">JSON 极速配置</button>
+                <button id="mcpToolsTab" class="memory-profile-secondary" type="button" aria-pressed="false" aria-controls="mcpToolsPane">工具全景 (Schema)</button>
+            </nav>
+
+            <!-- 面板 1: 服务列表 -->
+            <div id="mcpServersPane">
+                <div class="mcp-server-header-actions">
+                    <p class="mcp-helper-text">支持 stdio 本地管道与 HTTP 远程服务。配置变更即刻生效并自动热重载，无需重启整个 Agent。</p>
+                    <button id="mcpRefreshAllBtn" class="memory-profile-secondary" type="button">🔄 立即刷新探测</button>
+                </div>
+                <div id="mcpServersList" class="mcp-servers-list">
+                    <!-- 动态生成服务卡片 -->
+                </div>
+            </div>
+
+            <!-- 面板 2: 添加服务表单 -->
+            <div id="mcpAddPane" hidden>
+                <form id="mcpAddForm" class="mcp-form">
+                    <div class="memory-profile-grid">
+                        <div>
+                            <label for="mcpServerName">服务标识 (ID)*</label>
+                            <input id="mcpServerName" type="text" placeholder="例如 weather-service 或 my-ops" required autocomplete="off">
+                        </div>
+                        <div>
+                            <label for="mcpTransport">通信协议</label>
+                            <select id="mcpTransport">
+                                <option value="stdio">stdio (本地子进程管道，推荐)</option>
+                                <option value="streamable-http">streamable-http / SSE (远程微服务)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="mcpStdioFields">
+                        <label for="mcpCommand">执行命令 (Command)*</label>
+                        <input id="mcpCommand" type="text" placeholder="例如 python 或 npx 或绝对路径" value="python" autocomplete="off">
+                        <label for="mcpArgs">启动参数 (Args，每行一个参数)</label>
+                        <textarea id="mcpArgs" rows="3" placeholder="-u&#10;mcp_servers/my_monitor_mcp.py"></textarea>
+                    </div>
+                    <div id="mcpHttpFields" hidden>
+                        <label for="mcpUrl">服务 URL*</label>
+                        <input id="mcpUrl" type="url" placeholder="例如 http://localhost:8005/mcp" autocomplete="off">
+                    </div>
+                    <div class="memory-profile-actions" style="margin-top: 16px;">
+                        <button class="knowledge-primary" type="submit">保存并立即挂载</button>
+                        <button id="mcpAddCancelBtn" class="memory-profile-secondary" type="button">取消</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- 面板 3: JSON 配置编辑 -->
+            <div id="mcpJsonPane" hidden>
+                <p class="mcp-helper-text">实时双向同步项目根目录 <code>mcp_servers.json</code>，格式与 VS Code (Cline) / Claude Desktop 100% 互通通用。</p>
+                <div class="mcp-json-editor-container">
+                    <textarea id="mcpJsonEditor" class="mcp-json-editor" spellcheck="false" rows="12"></textarea>
+                </div>
+                <div class="memory-profile-actions" style="margin-top: 12px;">
+                    <button id="mcpSaveJsonBtn" class="knowledge-primary" type="button">保存并热重载</button>
+                    <button id="mcpFormatJsonBtn" class="memory-profile-secondary" type="button">格式化 JSON</button>
+                    <button id="mcpResetJsonBtn" class="memory-profile-secondary" type="button">重置</button>
+                </div>
+                <div id="mcpJsonStatus" class="knowledge-result" role="status" aria-live="polite"><p></p></div>
+            </div>
+
+            <!-- 面板 4: 工具全景 Schema -->
+            <div id="mcpToolsPane" hidden>
+                <div class="mcp-tools-search-bar" style="margin-bottom: 12px;">
+                    <input id="mcpToolSearchInput" type="text" placeholder="搜索已注册工具名称、描述或参数..." autocomplete="off">
+                </div>
+                <div id="mcpToolsList" class="mcp-tools-list">
+                    <!-- 动态生成所有工具 Schema 卡片 -->
+                </div>
+            </div>
+        </div>
+    </dialog>
+
     <!-- 加载遮罩层 -->
     <div id="loadingOverlay" class="loading-overlay">
         <div class="loading-content">
@@ -173,6 +687,9 @@
         </div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/memory-incidents.js?v=20261110_02"></script>
+    <script src="/static/memory-jobs.js?v=20261110_02"></script>
+    <script src="/static/mcp-manager.js?v=20261110_02"></script>
+    <script src="/static/app.js?v=20261110_02"></script>
 </body>
 </html>

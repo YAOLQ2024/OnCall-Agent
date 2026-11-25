@@ -5,6 +5,8 @@ AIOps 请求和响应模型
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
+from app.models.memory import MemoryScope
+
 
 class AIOpsRequest(BaseModel):
     """AIOps 诊断请求"""
@@ -14,6 +16,9 @@ class AIOpsRequest(BaseModel):
         description="会话ID，用于追踪诊断历史"
     )
     
+    memory_scope: MemoryScope | None = None
+    symptoms: str | None = Field(default=None, max_length=64_000)
+
     class Config:
         json_schema_extra = {
             "example": {

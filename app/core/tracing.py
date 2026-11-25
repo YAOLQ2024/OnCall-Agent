@@ -16,13 +16,17 @@ def configure_langsmith(settings: Settings) -> None:
     values = {
         "LANGSMITH_TRACING": str(settings.langsmith_tracing).lower(),
         "LANGSMITH_TRACING_V2": str(settings.langsmith_tracing).lower(),
+        "LANGCHAIN_TRACING_V2": str(settings.langsmith_tracing).lower(),
         "LANGSMITH_PROJECT": settings.langsmith_project,
+        "LANGCHAIN_PROJECT": settings.langsmith_project,
         "LANGSMITH_ENDPOINT": settings.langsmith_endpoint,
+        "LANGCHAIN_ENDPOINT": settings.langsmith_endpoint,
         "LANGSMITH_HIDE_INPUTS": str(settings.langsmith_hide_inputs).lower(),
         "LANGSMITH_HIDE_OUTPUTS": str(settings.langsmith_hide_outputs).lower(),
     }
     if key:
         values["LANGSMITH_API_KEY"] = key
+        values["LANGCHAIN_API_KEY"] = key
     if settings.langsmith_workspace_id:
         values["LANGSMITH_WORKSPACE_ID"] = settings.langsmith_workspace_id
     os.environ.update(values)

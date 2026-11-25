@@ -2,9 +2,11 @@
 
 import asyncio
 import json
+import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
@@ -26,6 +28,91 @@ def _tool_trace_output(tools: list | None) -> dict:
         {"name": tool.name, "description": tool.description, "args": tool.args}
         for tool in tools or []
     ]}
+
+
+LOCAL_TOOL_NAMES = frozenset({"retrieve_knowledge", "get_current_time", "search_web"})
+
+# 记录已产生告警的冲突特征元组: (raw_name, (sources...), new_name)，避免周期性轮询/快照读取时重复刷屏
+_logged_collision_signatures: set[tuple[str, tuple[str, ...], str]] = set()
+
+
+def _clone_tool_with_name(tool: Any, new_name: str, new_description: str | None = None) -> Any:
+    """复制工具并重命名，安全保留执行闭包、参数 Schema 与回调"""
+    update: dict[str, Any] = {"name": new_name}
+    if new_description is not None:
+        update["description"] = new_description
+    if hasattr(tool, "model_copy"):
+        try:
+            return tool.model_copy(update=update)
+        except Exception:
+            pass
+    if hasattr(tool, "copy") and callable(tool.copy):
+        try:
+            return tool.copy(update=update)
+        except Exception:
+            pass
+    import copy
+    cloned = copy.copy(tool)
+    cloned.name = new_name
+    if new_description is not None and hasattr(cloned, "description"):
+        cloned.description = new_description
+    return cloned
+
+
+def disambiguate_tools(
+    tools_by_server: dict[str, list],
+    reserved_local_names: frozenset[str] | set[str] = LOCAL_TOOL_NAMES,
+) -> tuple[list, dict[str, list]]:
+    """
+    智能冲突消歧算法（Option A）：
+    1. 统计所有服务与本地保留工具中各工具名的出现频次。
+    2. 全局唯一的工具保持自然短名（如 get_current_weather、search_log）。
+    3. 若存在同名冲突（跨服务重名或侵占本地工具名），自动为冲突工具添加 `{safe_server_name}__{original_name}` 前缀，
+       并在描述头部注入 `[来源服务: {server_name}]`，同时记录 Warning 告警日志。
+    4. 返回 (所有消歧后的工具平铺列表, 按服务划分的消歧后工具字典)。
+    """
+    # 1. 统计每个工具名在哪些服务中出现
+    tool_occurrences: dict[str, list[str]] = defaultdict(list)
+    for server_name, tools in tools_by_server.items():
+        for tool in tools:
+            tool_name = getattr(tool, "name", str(tool))
+            tool_occurrences[tool_name].append(server_name)
+
+    # 2. 识别发生冲突的工具名集合（跨服务重复或侵占本地保留工具名）
+    colliding_names = {
+        name for name, servers in tool_occurrences.items()
+        if len(servers) > 1 or (reserved_local_names and name in reserved_local_names)
+    }
+
+    # 3. 按服务逐个处理工具，发生冲突的进行消歧重命名，唯一的保持原样
+    all_disambiguated: list = []
+    disambiguated_by_server: dict[str, list] = {}
+
+    for server_name, tools in tools_by_server.items():
+        server_tools: list = []
+        safe_prefix = re.sub(r"[^a-zA-Z0-9_]", "_", server_name).strip("_") or "mcp"
+        for tool in tools:
+            raw_name = getattr(tool, "name", str(tool))
+            if raw_name in colliding_names:
+                new_name = f"{safe_prefix}__{raw_name}"
+                raw_desc = getattr(tool, "description", "") or ""
+                new_desc = f"[来源服务: {server_name}] {raw_desc}".strip()
+                cloned = _clone_tool_with_name(tool, new_name, new_desc)
+                sig = (raw_name, tuple(sorted(tool_occurrences[raw_name])), new_name)
+                if sig not in _logged_collision_signatures:
+                    _logged_collision_signatures.add(sig)
+                    logger.warning(
+                        "⚠️ [MCP 工具冲突自动消歧] 检测到工具 '{}' 在多个服务中重复定义 (冲突来源: {})，已自动重命名为 '{}'",
+                        raw_name, tool_occurrences[raw_name], new_name,
+                    )
+                server_tools.append(cloned)
+                all_disambiguated.append(cloned)
+            else:
+                server_tools.append(tool)
+                all_disambiguated.append(tool)
+        disambiguated_by_server[server_name] = server_tools
+
+    return all_disambiguated, disambiguated_by_server
 
 
 @dataclass
@@ -64,6 +151,9 @@ class MCPToolRegistry:
             for name, connection in self._connections.items()
         }
         self.version = 0
+        self._cached_disambiguation_version: int = -1
+        self._cached_flat_tools: list = []
+        self._cached_by_server: dict[str, list] = {}
         self._refresh_lock = asyncio.Lock()
         self._wake = asyncio.Event()
         self._force_refresh = False
@@ -71,17 +161,77 @@ class MCPToolRegistry:
         self._stopping = False
         self._worker: asyncio.Task | None = None
 
+    def _get_disambiguated_tools(self) -> tuple[list, dict[str, list]]:
+        if self._cached_disambiguation_version != self.version:
+            flat, by_server = disambiguate_tools(self._tools, LOCAL_TOOL_NAMES)
+            self._cached_flat_tools = flat
+            self._cached_by_server = by_server
+            self._cached_disambiguation_version = self.version
+        return self._cached_flat_tools, self._cached_by_server
+
     def snapshot(self) -> tuple[int, list]:
-        """同步读取快照，不等待连接或探测；每次调用返回独立列表。"""
-        return self.version, [tool for tools in self._tools.values() for tool in tools]
+        """同步读取快照，返回智能冲突消歧后的平铺工具列表。"""
+        tools, _ = self._get_disambiguated_tools()
+        return self.version, tools
 
     def status(self) -> dict:
+        _, disambiguated_by_server = self._get_disambiguated_tools()
+        servers_status = []
+        for state in self._states.values():
+            name = state["name"]
+            tool_objs = disambiguated_by_server.get(name, self._tools.get(name, []))
+            tool_details = [
+                {
+                    "name": getattr(t, "name", str(t)),
+                    "description": getattr(t, "description", ""),
+                    "args": getattr(t, "args", {}),
+                }
+                for t in tool_objs
+            ]
+            servers_status.append({
+                **state,
+                "tools": [getattr(t, "name", str(t)) for t in tool_objs],
+                "tool_details": tool_details,
+            })
         return {
-            "local_tools": ["retrieve_knowledge", "get_current_time"],
+            "local_tools": list(LOCAL_TOOL_NAMES),
             "refreshing": self._refresh_lock.locked(),
             "auto_start": self.settings.mcp_auto_start,
-            "servers": [{**state, "tools": list(state["tools"])} for state in self._states.values()],
+            "servers": servers_status,
         }
+
+    async def reload_config(self) -> dict:
+        """重新读取 settings.mcp_servers 并热重载 MCP 服务连接"""
+        new_connections = self.settings.mcp_servers
+        async with self._refresh_lock:
+            for name in list(self._sessions.keys()):
+                if name not in new_connections or new_connections[name] != self._connections.get(name):
+                    await self._close_session(name)
+
+            for name in list(self._states.keys()):
+                if name not in new_connections:
+                    self._states.pop(name, None)
+                    self._tools.pop(name, None)
+
+            for name, connection in new_connections.items():
+                if name not in self._states:
+                    self._tools[name] = []
+                    self._states[name] = {
+                        "name": name,
+                        "label": {"cls": "CLS 日志工具", "monitor": "Monitor 监控工具"}.get(name, name),
+                        "status": "checking",
+                        "transport": connection.get("transport", "stdio"),
+                        "tools": [],
+                        "last_error": "",
+                        "last_checked": None,
+                    }
+
+            self._connections = new_connections
+            self._client = self._client_factory(self._connections)
+            self.version += 1
+
+        self.request_refresh()
+        return self.status()
 
     async def start(self) -> None:
         if self._worker is None or self._worker.done():
@@ -108,11 +258,17 @@ class MCPToolRegistry:
         self._stopping = True
         if self._worker is not None:
             self._wake.set()
-            await self._worker
+            try:
+                await self._worker
+            except (asyncio.CancelledError, Exception):
+                pass
             self._worker = None
         else:
             for name in list(self._sessions):
-                await self._close_session(name)
+                try:
+                    await self._close_session(name)
+                except Exception:
+                    pass
 
     async def _run(self) -> None:
         try:
@@ -122,17 +278,24 @@ class MCPToolRegistry:
                 self._force_refresh = False
                 try:
                     await self.refresh(force=force)
+                except asyncio.CancelledError:
+                    break
                 except Exception as error:
                     logger.error("MCP 后台发现失败，知识库问答继续可用：{}", _exception_details(error))
                 if self._stopping:
                     break
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout=self.settings.mcp_refresh_interval)
-                except TimeoutError:
+                except (TimeoutError, asyncio.CancelledError):
                     pass
+        except asyncio.CancelledError:
+            pass
         finally:
             for name in list(self._sessions):
-                await self._close_session(name)
+                try:
+                    await self._close_session(name)
+                except Exception:
+                    pass
 
     @staticmethod
     def _signature(tools: list) -> str:

@@ -8,20 +8,25 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import ToolNode
 from loguru import logger
 
+from langgraph.runtime import Runtime
+from app.models.memory_runtime import MemoryRunContext, memory_data_messages, memory_policy
+
 from app.config import config
-from app.core.llm_factory import llm_factory
+from app.core.llm_factory import llm_factory, model_quota_exhausted
 from app.tools import get_current_time, retrieve_knowledge
 from app.agent.mcp_client import mcp_registry
+from app.agent.compactor import SREToolOutputCompressor
 from .state import PlanExecuteState
 
 
-async def executor(state: PlanExecuteState) -> Dict[str, Any]:
+async def executor(state: PlanExecuteState, runtime: Runtime[MemoryRunContext] | None = None) -> Dict[str, Any]:
     """
     执行节点：执行计划中的下一个步骤
     
     使用 LangGraph 的 ToolNode 自动处理工具调用
     """
     logger.info("=== Executor：执行步骤 ===")
+    memory = runtime.context if runtime else None
 
     plan = state.get("plan", [])
 
@@ -72,12 +77,14 @@ async def executor(state: PlanExecuteState) -> Dict[str, Any]:
 - 如果工具调用失败，请说明失败原因
 - 不要编造数据，只返回实际获取的信息
 - 执行结果要清晰、准确
-- 专注于当前步骤，不要考虑其他任务""" + "\n" + mcp_registry.availability_message()),
+- 专注于当前步骤，不要考虑其他任务""" + "\n" + mcp_registry.availability_message() + memory_policy(memory)),
             HumanMessage(content=f"请执行以下任务: {task}")
         ]
 
+        # References stay in the model view, away from ToolNode's injected state.
+        model_messages = [messages[0], *memory_data_messages(memory), messages[1]]
         # 第一步：LLM 决定是否调用工具
-        llm_response = await llm_with_tools.ainvoke(messages)
+        llm_response = await llm_with_tools.ainvoke(model_messages)
         logger.info(f"LLM 响应类型: {type(llm_response)}")
 
         # 第二步：如果有工具调用，执行工具
@@ -88,9 +95,14 @@ async def executor(state: PlanExecuteState) -> Dict[str, Any]:
             messages.append(llm_response)
             tool_messages = await tool_node.ainvoke({"messages": messages})
             
-            # 第三步：将工具结果返回给 LLM 生成最终答案
-            messages.extend(tool_messages["messages"])
-            final_response = await llm_with_tools.ainvoke(messages)
+            # 第三步：对超过配置阈值的单次工具输出执行结构化剪枝后，返回给 LLM 生成结论
+            executed_msgs = [
+                msg.model_copy(update={"content": SREToolOutputCompressor.compress(msg.content)})
+                if hasattr(msg, "content") and isinstance(msg.content, str)
+                else msg
+                for msg in tool_messages["messages"]
+            ]
+            final_response = await llm_with_tools.ainvoke([*model_messages, llm_response, *executed_msgs])
             result = final_response.content if hasattr(final_response, 'content') else str(final_response)
         else:
             # 没有工具调用，直接使用 LLM 的输出
@@ -106,7 +118,9 @@ async def executor(state: PlanExecuteState) -> Dict[str, Any]:
         }
 
     except Exception as e:
-        logger.error(f"执行步骤失败: {e}", exc_info=True)
+        if model_quota_exhausted(e):
+            raise
+        logger.error("执行步骤失败: {}", e)
         return {
             "plan": plan[1:],
             "past_steps": [(task, f"执行失败: {str(e)}")],

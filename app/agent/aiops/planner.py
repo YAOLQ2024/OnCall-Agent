@@ -9,8 +9,11 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from loguru import logger
 
+from langgraph.runtime import Runtime
+from app.models.memory_runtime import MemoryRunContext, memory_data_messages, memory_policy
+
 from app.config import config
-from app.core.llm_factory import llm_factory
+from app.core.llm_factory import llm_factory, model_quota_exhausted
 from app.tools import get_current_time, retrieve_knowledge
 from app.agent.mcp_client import mcp_registry
 from .state import PlanExecuteState
@@ -38,7 +41,7 @@ planner_prompt = ChatPromptTemplate.from_messages(
 
                 注意：你的职责是制定计划，实际的工具调用由 Executor 负责执行。
 
-                {experience_context}
+                {experience_context}{memory_policy}
 
                 对于给定的任务，请创建一个简单的、逐步的计划来完成它。计划应该：
                 - 将任务分解为逻辑上独立的步骤
@@ -60,7 +63,7 @@ planner_prompt = ChatPromptTemplate.from_messages(
 )
 
 
-async def planner(state: PlanExecuteState) -> Dict[str, Any]:
+async def planner(state: PlanExecuteState, runtime: Runtime[MemoryRunContext] | None = None) -> Dict[str, Any]:
     """
     规划节点：根据用户输入生成执行计划
 
@@ -70,6 +73,7 @@ async def planner(state: PlanExecuteState) -> Dict[str, Any]:
     """
     logger.info("=== Planner：制定执行计划 ===")
 
+    memory = runtime.context if runtime else None
     input_text = state.get("input", "")
     logger.info(f"用户输入: {input_text}")
 
@@ -130,9 +134,10 @@ async def planner(state: PlanExecuteState) -> Dict[str, Any]:
 
         # 调用 LLM 生成计划
         plan_result = await planner_chain.ainvoke({
-            "messages": [("user", input_text)],
+            "messages": [*memory_data_messages(memory), ("user", input_text)],
             "tools_description": tools_description,
-            "experience_context": experience_context
+            "experience_context": experience_context,
+            "memory_policy": memory_policy(memory)
         })
 
         # 提取步骤列表
@@ -149,7 +154,9 @@ async def planner(state: PlanExecuteState) -> Dict[str, Any]:
         return {"plan": plan_steps}
 
     except Exception as e:
-        logger.error(f"生成计划失败: {e}", exc_info=True)
+        if model_quota_exhausted(e):
+            raise
+        logger.error("生成计划失败: {}", e)
         # 返回一个默认计划
         return {
             "plan": [

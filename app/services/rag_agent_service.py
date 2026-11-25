@@ -1,5 +1,7 @@
 """RAG Agent 服务 - 基于 LangGraph 和千问 OpenAI 兼容接口。"""
 
+import asyncio
+import re
 from typing import Annotated, Any, AsyncGenerator, Dict, Sequence
 
 from langchain.agents import create_agent
@@ -9,60 +11,132 @@ from langchain_core.messages import (
     RemoveMessage,
     SystemMessage,
 )
-from langgraph.checkpoint.memory import MemorySaver
+from app.storage.sqlite_saver import sqlite_checkpointer
+from app.storage.session_db import session_db_manager, checkpoint_thread_id
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from loguru import logger
 from langsmith import traceable
 from typing_extensions import TypedDict
 from app.config import config
-from app.core.llm_factory import llm_factory
-from app.tools import get_current_time, retrieve_knowledge
+from app.core.llm_factory import llm_factory, model_error_message
+from app.tools import get_current_time, retrieve_knowledge, search_web
 from app.agent.mcp_client import mcp_registry
 from app.agent.rag_context_middleware import RagContextDedupMiddleware
+from app.agent.memory_context_middleware import MemoryContextMiddleware
+from app.models.memory_runtime import MemoryRunContext, bound_context
+from app.agent.compactor import (
+    ContextCompactorMiddleware,
+    compaction_event_emitter,
+    context_compactor,
+)
 
 class AgentState(TypedDict):
     """Agent 状态"""
     messages: Annotated[Sequence[BaseMessage], add_messages]
 
 
-def trim_messages_middleware(state: AgentState) -> dict[str, Any] | None:
+async def trim_messages_middleware(state: AgentState) -> dict[str, Any] | None:
     """
-    修剪消息历史，只保留最近的几条消息以适应上下文窗口
+    工业级三级上下文压缩状态更新入口（替代早期粗糙的固定条数截断）。
 
     策略：
-    - 保留第一条系统消息（System Message）
-    - 保留最近的 6 条消息（3 轮对话）
-    - 当消息少于等于 7 条时，不做修剪
-
-    Args:
-        state: Agent 状态
-
-    Returns:
-        包含修剪后消息的字典，如果无需修剪则返回 None
+    - Stage 1：最近 2 轮热数据 100% 原始保留；温数据超过配置阈值的 ToolMessage 原位结构化剪枝（OpenHands + SWE-agent 算法）
+    - Stage 2：达到配置的 token 高水位时，按需触发单次轻量模型提取 SREIncidentMemory
+    - Stage 3：按原子对话轮次整体演进状态，严防拆散 AIMessage(tool_calls) 与 ToolMessage
     """
-    messages = state["messages"]
+    return await context_compactor.compact_langgraph_state(state)
 
-    # 如果消息数量较少，无需修剪
-    if len(messages) <= 7:
-        return None
 
-    # 提取第一条系统消息
-    first_msg = messages[0]
+def _extract_web_references(content: str) -> list[dict[str, str]]:
+    """从 perform_web_search 的输出文本中提取条目 (title, url)"""
+    refs = []
+    current_title = ""
+    for line in content.splitlines():
+        line = line.strip()
+        m_title = re.match(r"^\[\d+\]\s*(.+?)(?:\s*\(相关度:[^)]+\))?$", line)
+        if m_title:
+            current_title = m_title.group(1).strip()
+            continue
+        if line.startswith("来源链接:") and current_title:
+            url = line.replace("来源链接:", "").strip()
+            if url:
+                refs.append({"title": current_title, "url": url})
+            current_title = ""
+    return refs
 
-    # 保留最近的 6 条消息（确保包含完整的对话轮次）
-    recent_messages = messages[-6:] if len(messages) % 2 == 0 else messages[-7:]
 
-    # 构建新的消息列表
-    new_messages = [first_msg] + list(recent_messages)
+def _extract_doc_references(docs_or_content: Any) -> list[dict[str, str]]:
+    """提取内部知识库文档的来源文件名与章节路径"""
+    refs = []
+    if isinstance(docs_or_content, list):
+        for doc in docs_or_content:
+            meta = getattr(doc, "metadata", {}) if hasattr(doc, "metadata") else {}
+            source = meta.get("source") or meta.get("_source") or "内部知识文档"
+            filename = source.replace("\\", "/").split("/")[-1]
+            headers = [meta[k] for k in ["h1", "h2", "h3"] if k in meta and meta[k]]
+            header_str = " > ".join(headers) if headers else meta.get("title", "")
+            refs.append({"filename": filename, "header": header_str})
+    elif isinstance(docs_or_content, str):
+        current_header = ""
+        for line in docs_or_content.splitlines():
+            line = line.strip()
+            if line.startswith("标题:"):
+                current_header = line.replace("标题:", "").strip()
+            elif line.startswith("来源:"):
+                src = line.replace("来源:", "").strip()
+                filename = src.replace("\\", "/").split("/")[-1]
+                refs.append({"filename": filename, "header": current_header})
+                current_header = ""
 
-    logger.debug(f"修剪消息历史: {len(messages)} -> {len(new_messages)} 条")
+    unique_refs = []
+    seen = set()
+    for r in refs:
+        k = (r["filename"], r["header"])
+        if k not in seen:
+            seen.add(k)
+            unique_refs.append(r)
+    return unique_refs
 
-    return {
-        "messages": [
-            RemoveMessage(id=REMOVE_ALL_MESSAGES),
-            *new_messages
-        ]
-    }
+
+def _append_citations_if_missing(
+    answer: str,
+    web_references: list[dict[str, str]],
+    doc_references: list[dict[str, str]],
+) -> tuple[str, str]:
+    """若模型回答末尾缺少结构化引用，自动生成并追加溯源 Markdown 块。
+    返回: (完整答案, 仅新增的溯源文本块)
+    """
+    appended = ""
+    if web_references:
+        has_web_citation = ("参考公网" in answer or "参考网页" in answer) and "http" in answer
+        if not has_web_citation:
+            block = "\n\n---\n### 🌐 参考公网资料\n"
+            seen_urls = set()
+            idx = 1
+            for r in web_references:
+                url = r.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    block += f"- [{idx}] [{r.get('title', '网页链接')}]({url})\n"
+                    idx += 1
+            appended += block
+
+    if doc_references:
+        has_doc_citation = "参考内部知识库" in answer or "参考知识库" in answer or "### 📚 参考" in answer
+        if not has_doc_citation:
+            block = "\n\n---\n### 📚 参考内部知识库\n"
+            seen_docs = set()
+            idx = 1
+            for r in doc_references:
+                fn = r.get("filename", "")
+                if fn and fn not in seen_docs:
+                    seen_docs.add(fn)
+                    h = f"（{r['header']}）" if r.get("header") else ""
+                    block += f"- [{idx}] `{fn}` {h}\n"
+                    idx += 1
+            appended += block
+
+    return answer + appended, appended
 
 
 class RagAgentService:
@@ -85,20 +159,20 @@ class RagAgentService:
             streaming=streaming,
         )
 
-        # 定义基础工具
-        self.tools = [retrieve_knowledge, get_current_time]
+        # 定义基础本地核心工具（知识检索 + 时间锚定 + 联网搜索）
+        self.tools = [retrieve_knowledge, get_current_time, search_web]
 
         # MCP 客户端（延迟初始化，使用全局管理）
         self.mcp_tools: list = []
 
-        # 创建内存检查点（用于会话管理）
-        self.checkpointer = MemorySaver()
+        # 创建持久化检查点（基于 SQLite 持久化会话状态）
+        self.checkpointer = sqlite_checkpointer
 
         # Agent 初始化（会在异步方法中完成）
         self.agent = None
         self._tools_version = -1
 
-        logger.info(f"RAG Agent 服务初始化完成 (Qwen), model={self.model_name}, streaming={streaming}")
+        logger.info(f"RAG Agent 服务初始化完成 (Qwen-Persistent), model={self.model_name}, streaming={streaming}")
 
     @traceable(
         name="agent.initialize", run_type="chain",
@@ -119,7 +193,8 @@ class RagAgentService:
         self.agent = create_agent(
             self.model,
             tools=all_tools,
-            middleware=[RagContextDedupMiddleware()],
+            middleware=[ContextCompactorMiddleware(), RagContextDedupMiddleware(), MemoryContextMiddleware()],
+            context_schema=MemoryRunContext,
             checkpointer=self.checkpointer,
         )
 
@@ -144,27 +219,32 @@ class RagAgentService:
         from textwrap import dedent
 
         return dedent("""
-            你是一个专业的AI助手，能够使用多种工具来帮助用户解决问题。
+            你是一个专业的智能运维 (SRE) 诊断与问答 AI 助手，能够使用多种工具协同帮助用户解决问题。
 
-            工作原则:
-            1. 理解用户需求，选择合适的工具来完成任务
-            2. 当需要获取实时信息或专业知识时，主动使用相关工具
-            3. 基于工具返回的结果提供准确、专业的回答
-            4. 如果工具无法提供足够信息，请诚实地告知用户
+            工具使用协同准则:
+            1. 【内部知识优先】涉及内部运维 SOP、系统架构规范、告警定义、处理流程等内部问题时，优先调用 `retrieve_knowledge` 工具；
+            2. 【按需联网补充】当内部知识库未检索到相关内容、或用户明确要求查询开源社区最新动态、外部 CVE 漏洞、第三方库最新版本特性时，调用 `search_web` 进行公网搜索；
+            3. 【时间基准锚定】当需要明确当前日期、时间或计算故障时间窗时，调用 `get_current_time` 获取权威当前时间；
+            4. 【客观严谨回答】所有结论基于工具返回的真实内容进行归纳分析，严禁无中生有编造事实。
+
+            信息溯源强制规范:
+            - 若调用了 `search_web` 联网搜索，必须在回答的最末尾单开一行输出 `### 🌐 参考公网资料`，逐条以 Markdown 列表格式列出所参考网页的完整链接与标题，格式如：
+              - [1] [网页标题](完整URL)
+            - 若调用了 `retrieve_knowledge` 知识检索，必须在回答的最末尾单开一行输出 `### 📚 参考内部知识库`，列出所引用的内部文档名称与章节，格式如：
+              - [1] `文档名称.md` (章节路径)
 
             回答要求:
-            - 保持友好、专业的语气
-            - 回答简洁明了，重点突出
-            - 基于事实，不编造信息
-            - 如有不确定的地方，明确说明
-
-            请根据用户的问题，灵活使用可用工具，提供高质量的帮助。
+            - 保持专业、严谨、沉稳的 SRE 工程师语气
+            - 结构清晰，核心结论先行，随后附带技术依据与操作建议
         """).strip()
 
     async def query(
         self,
         question: str,
         session_id: str,
+        user_id: str = "sre_alice",
+        *,
+        memory_context: MemoryRunContext | None = None,
     ) -> str:
         """
         非流式处理用户问题（一次性返回完整答案）
@@ -196,14 +276,12 @@ class RagAgentService:
                 "tags": ["oncall", "chat"],
                 "metadata": {"session_id": session_id, "thread_id": session_id},
                 "configurable": {
-                    "thread_id": session_id
+                    "thread_id": checkpoint_thread_id(user_id, session_id, "rag")
                 }
             }
 
-            result = await agent.ainvoke(
-                input=agent_input,
-                config=config_dict,
-            )
+            memory = bound_context(memory_context, user_id, session_id)
+            result = await agent.ainvoke(input=agent_input, config=config_dict, context=memory)
 
             # 提取最终答案
             messages_result = result.get("messages", [])
@@ -211,11 +289,18 @@ class RagAgentService:
                 last_message = messages_result[-1]
                 answer = last_message.content if hasattr(last_message, 'content') else str(last_message)
 
-                # 记录工具调用
-                if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                    tool_names = [tc.get("name", "unknown") for tc in last_message.tool_calls]
-                    logger.info(f"[会话 {session_id}] Agent 调用了工具: {tool_names}")
+                # 收集工具调用中的网页引用与知识库文档引用
+                web_refs: list[dict[str, str]] = []
+                doc_refs: list[dict[str, str]] = []
+                for m in messages_result:
+                    if type(m).__name__ == "ToolMessage":
+                        tname = getattr(m, "name", "")
+                        if tname == "search_web":
+                            web_refs.extend(_extract_web_references(str(getattr(m, "content", ""))))
+                        elif tname == "retrieve_knowledge":
+                            doc_refs.extend(_extract_doc_references(getattr(m, "artifact", None) or str(getattr(m, "content", ""))))
 
+                answer, _ = _append_citations_if_missing(answer, web_refs, doc_refs)
                 logger.info(f"[会话 {session_id}] RAG Agent 查询完成（非流式）")
                 return answer
 
@@ -230,6 +315,9 @@ class RagAgentService:
         self,
         question: str,
         session_id: str,
+        user_id: str = "sre_alice",
+        *,
+        memory_context: MemoryRunContext | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         流式处理用户问题（逐步返回答案片段）
@@ -240,7 +328,7 @@ class RagAgentService:
 
         Yields:
             Dict[str, Any]: 包含流式数据的字典
-                - type: "content" | "tool_call" | "complete" | "error"
+                - type: "content" | "tool_call" | "search_results" | "complete" | "error"
                 - data: 具体内容
         """
         try:
@@ -263,128 +351,169 @@ class RagAgentService:
                 "tags": ["oncall", "chat", "stream"],
                 "metadata": {"session_id": session_id, "thread_id": session_id},
                 "configurable": {
-                    "thread_id": session_id
+                    "thread_id": checkpoint_thread_id(user_id, session_id, "rag")
                 }
             }
 
-            async for token, metadata in agent.astream(
-                input=agent_input,
-                config=config_dict,
-                stream_mode="messages",
-            ):
-                node_name = metadata.get('langgraph_node', 'unknown') if isinstance(metadata, dict) else 'unknown'
-                message_type = type(token).__name__
+            # 注册上下文压缩通知队列，用于捕获微观剪枝与宏观归纳事件
+            compaction_queue: asyncio.Queue = asyncio.Queue()
+            compaction_token = compaction_event_emitter.set(compaction_queue)
 
-                if message_type in ("AIMessage", "AIMessageChunk"):
-                    content_blocks = getattr(token, 'content_blocks', None)
+            seen_tool_calls: set[str] = set()
+            web_references: list[dict[str, str]] = []
+            doc_references: list[dict[str, str]] = []
+            rag_full_answer = ""
 
-                    if content_blocks and isinstance(content_blocks, list):
-                        for block in content_blocks:
-                            if isinstance(block, dict) and block.get('type') == 'text':
-                                text_content = block.get('text', '')
-                                if text_content:
+            try:
+                memory = bound_context(memory_context, user_id, session_id)
+                async for token, metadata in agent.astream(
+                    input=agent_input, config=config_dict, stream_mode="messages", context=memory,
+                ):
+                    # 若触发了上下文压缩或剪枝，优先向下游透传通知事件
+                    while not compaction_queue.empty():
+                        c_event = compaction_queue.get_nowait()
+                        yield {
+                            "type": "compaction",
+                            "data": c_event
+                        }
+
+                    node_name = metadata.get('langgraph_node', 'unknown') if isinstance(metadata, dict) else 'unknown'
+                    message_type = type(token).__name__
+
+                    # 1. 拦截模型规划发起的工具调用
+                    if message_type in ("AIMessage", "AIMessageChunk"):
+                        tool_calls = getattr(token, "tool_calls", None)
+                        if tool_calls and isinstance(tool_calls, list):
+                            for tc in tool_calls:
+                                tc_name = tc.get("name")
+                                tc_id = tc.get("id") or tc_name
+                                if tc_name and tc_id not in seen_tool_calls:
+                                    seen_tool_calls.add(tc_id)
+                                    query_arg = (tc.get("args") or {}).get("query", "")
                                     yield {
-                                        "type": "content",
-                                        "data": text_content,
-                                        "node": node_name
+                                        "type": "tool_call",
+                                        "data": {
+                                            "tool": tc_name,
+                                            "status": "调用中",
+                                            "query": query_arg,
+                                            "details": f"参数: {query_arg}" if query_arg else "正在准备执行...",
+                                        }
                                     }
 
+                        # 文本片段流式输出
+                        text_piece = ""
+                        content_blocks = getattr(token, 'content_blocks', None)
+                        if content_blocks and isinstance(content_blocks, list):
+                            for block in content_blocks:
+                                if isinstance(block, dict) and block.get('type') == 'text':
+                                    text_piece += block.get('text', '')
+                        if not text_piece and isinstance(getattr(token, 'content', None), str):
+                            text_piece = token.content
+
+                        if text_piece:
+                            rag_full_answer += text_piece
+                            yield {
+                                "type": "content",
+                                "data": text_piece,
+                                "node": node_name
+                            }
+
+                    # 2. 拦截工具执行完成事件 (ToolMessage)
+                    elif message_type == "ToolMessage":
+                        tool_name = getattr(token, "name", "") or "tool"
+                        raw_content = str(getattr(token, "content", ""))
+                        artifact = getattr(token, "artifact", None)
+
+                        if tool_name == "search_web":
+                            parsed_refs = _extract_web_references(raw_content)
+                            web_references.extend(parsed_refs)
+                            details = f"检索完成，找到 {len(parsed_refs)} 条公网参考资料" if parsed_refs else "公网检索完成"
+                            yield {
+                                "type": "tool_call",
+                                "data": {
+                                    "tool": "search_web",
+                                    "status": "已完成",
+                                    "details": details,
+                                }
+                            }
+                        elif tool_name == "retrieve_knowledge":
+                            parsed_docs = _extract_doc_references(artifact if artifact else raw_content)
+                            doc_references.extend(parsed_docs)
+                            doc_count = len(parsed_docs)
+                            doc_names = [d["filename"] for d in parsed_docs][:3]
+                            yield {
+                                "type": "tool_call",
+                                "data": {
+                                    "tool": "retrieve_knowledge",
+                                    "status": "已完成",
+                                    "details": f"内部知识库检索完成，召回 {doc_count} 篇相关文档",
+                                }
+                            }
+                            yield {
+                                "type": "search_results",
+                                "data": {
+                                    "count": doc_count,
+                                    "docs": doc_names,
+                                }
+                            }
+                        elif tool_name == "get_current_time":
+                            yield {
+                                "type": "tool_call",
+                                "data": {
+                                    "tool": "get_current_time",
+                                    "status": "已完成",
+                                    "details": f"当前时间: {raw_content.strip()}",
+                                }
+                            }
+                        else:
+                            yield {
+                                "type": "tool_call",
+                                "data": {
+                                    "tool": tool_name,
+                                    "status": "已完成",
+                                    "details": "执行完成",
+                                }
+                            }
+
+                # 消费任何尾部遗留的压缩通知
+                while not compaction_queue.empty():
+                    c_event = compaction_queue.get_nowait()
+                    yield {
+                        "type": "compaction",
+                        "data": c_event
+                    }
+
+                # 3. 结果溯源自动兜底补全
+                rag_full_answer, appended_citations = _append_citations_if_missing(
+                    rag_full_answer, web_references, doc_references
+                )
+                if appended_citations:
+                    yield {
+                        "type": "content",
+                        "data": appended_citations,
+                        "node": "citations",
+                    }
+
+            finally:
+                compaction_event_emitter.reset(compaction_token)
+
             logger.info(f"[会话 {session_id}] RAG Agent 查询完成（流式）")
-            yield {"type": "complete"}
+            yield {"type": "complete", "data": {"answer": rag_full_answer}}
 
         except Exception as e:
             logger.error(f"[会话 {session_id}] RAG Agent 查询失败（流式）: {e}")
             yield {
                 "type": "error",
-                "data": str(e)
+                "data": model_error_message(e)
             }
             raise
 
-    def get_session_history(self, session_id: str) -> list:
-        """
-        获取会话历史（从 MemorySaver checkpointer 中读取）
+    def get_session_history(self, session_id: str, user_id: str = "sre_alice") -> list:
+        # The message store is the UI source of truth; never fall back to an unscoped graph.
+        return [r.model_dump() for r in session_db_manager.get_messages(session_id, user_id)]
 
-        Args:
-            session_id: 会话ID（即 thread_id）
-
-        Returns:
-            list: 消息历史列表 [{"role": "user|assistant", "content": "...", "timestamp": "..."}]
-        """
-        try:
-            # 使用 checkpointer 的 get 方法获取最新的检查点
-            config = {"configurable": {"thread_id": session_id}}
-            
-            # 获取该 thread 的最新检查点
-            checkpoint_tuple = self.checkpointer.get(config)
-            
-            if not checkpoint_tuple:
-                logger.info(f"获取会话历史: {session_id}, 消息数量: 0")
-                return []
-            
-            # checkpoint_tuple 可能是命名元组或普通元组，安全地提取 checkpoint
-            # 通常第一个元素是 checkpoint 数据
-            if hasattr(checkpoint_tuple, 'checkpoint'):
-                checkpoint_data = checkpoint_tuple.checkpoint  # type: ignore
-            else:
-                # 如果是普通元组，第一个元素是 checkpoint
-                checkpoint_data = checkpoint_tuple[0] if checkpoint_tuple else {}
-            
-            # 从检查点中提取消息
-            messages = checkpoint_data.get("channel_values", {}).get("messages", [])
-            
-            # 转换为前端需要的格式
-            history = []
-            for msg in messages:
-                # 跳过系统消息
-                if isinstance(msg, SystemMessage):
-                    continue
-                    
-                role = "user" if isinstance(msg, HumanMessage) else "assistant"
-                content = msg.content if hasattr(msg, 'content') else str(msg)
-                
-                # 提取时间戳（如果有的话）
-                timestamp = getattr(msg, 'timestamp', None)
-                if timestamp:
-                    history.append({
-                        "role": role,
-                        "content": content,
-                        "timestamp": timestamp
-                    })
-                else:
-                    from datetime import datetime
-                    history.append({
-                        "role": role,
-                        "content": content,
-                        "timestamp": datetime.now().isoformat()
-                    })
-            
-            logger.info(f"获取会话历史: {session_id}, 消息数量: {len(history)}")
-            return history
-            
-        except Exception as e:
-            logger.error(f"获取会话历史失败: {session_id}, 错误: {e}")
-            return []
-
-    def clear_session(self, session_id: str) -> bool:
-        """
-        清空会话历史（从 MemorySaver checkpointer 中删除）
-
-        Args:
-            session_id: 会话ID（即 thread_id）
-
-        Returns:
-            bool: 是否成功
-        """
-        try:
-            # 使用 checkpointer 的 delete_thread 方法删除该 thread 的所有检查点
-            self.checkpointer.delete_thread(session_id)
-            
-            logger.info(f"已清除会话历史: {session_id}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"清空会话历史失败: {session_id}, 错误: {e}")
-            return False
+    def clear_session(self, session_id: str, user_id: str = "sre_alice") -> bool:
+        return session_db_manager.delete_session(session_id, user_id)
 
     async def cleanup(self):
         """清理资源"""

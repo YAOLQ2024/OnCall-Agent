@@ -1,3 +1,4 @@
+from app.api.session_guard import guard_session
 """
 AIOps 智能运维接口
 """
@@ -7,14 +8,20 @@ from fastapi import APIRouter
 from sse_starlette.sse import EventSourceResponse
 from loguru import logger
 
+from app.core.llm_factory import model_error_message
 from app.models.aiops import AIOpsRequest
 from app.services.aiops_service import aiops_service
+from app.api.auth import CurrentUser
+from app.services.memory_service import memory_service
+from app.api.chat import ensure_session
+from app.storage.session_db import session_db_manager
 
 router = APIRouter()
 
 
 @router.post("/aiops")
-async def diagnose_stream(request: AIOpsRequest):
+@guard_session
+async def diagnose_stream(request: AIOpsRequest, uid: CurrentUser):
     """
     AIOps 故障诊断接口（流式 SSE）
 
@@ -122,11 +129,31 @@ async def diagnose_stream(request: AIOpsRequest):
         SSE 事件流
     """
     session_id = request.session_id or "default"
+    ensure_session(session_id, uid)
     logger.info(f"[会话 {session_id}] 收到 AIOps 诊断请求（流式）")
 
     async def event_generator():
         try:
-            async for event in aiops_service.diagnose(session_id=session_id):
+            symptoms = (request.symptoms or "").strip()
+            snapshot = memory_service.capture_automatic(uid)
+            user_message_id = session_db_manager.record_message(session_id, "user", symptoms or "执行 AIOps 故障诊断", uid)
+            execution_trace = []
+            memory = await memory_service.retrieval.prepare(uid, session_id, symptoms, explicit=request.memory_scope)
+            if memory:
+                yield {"event": "message", "data": json.dumps(
+                    {"type": "memory_recall", "data": memory.public()}, ensure_ascii=False,
+                )}
+            async for event in aiops_service.diagnose(
+                session_id=session_id, user_id=uid, memory_context=memory, symptoms=symptoms,
+            ):
+                if event.get("type") == "complete":
+                    report = event.get("diagnosis", {}).get("report", "")
+                    event = {**event, **memory_service.save_turn(
+                        session_db_manager, uid, session_id, user_message_id, symptoms, report, snapshot, diagnostic=True,
+                        execution_trace=execution_trace,
+                    )}
+                elif event.get("type") in {"plan", "step_complete"}:
+                    execution_trace.append({"type": "aiops_progress", "data": event})
                 # 发送事件
                 yield {
                     "event": "message",
@@ -140,13 +167,13 @@ async def diagnose_stream(request: AIOpsRequest):
             logger.info(f"[会话 {session_id}] AIOps 诊断流式响应完成")
 
         except Exception as e:
-            logger.error(f"[会话 {session_id}] AIOps 诊断流式响应异常: {e}", exc_info=True)
+            logger.error("[会话 {}] AIOps 诊断流式响应异常: {}", session_id, e)
             yield {
                 "event": "message",
                 "data": json.dumps({
                     "type": "error",
                     "stage": "exception",
-                    "message": f"诊断异常: {str(e)}"
+                    "message": f"诊断异常: {model_error_message(e)}"
                 }, ensure_ascii=False)
             }
 

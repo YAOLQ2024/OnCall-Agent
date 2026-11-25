@@ -5,7 +5,12 @@
 
 from typing import AsyncGenerator, Dict, Any
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Overwrite
+from app.core.llm_factory import model_error_message
+from app.models.memory_runtime import MemoryRunContext, bound_context
+
+from app.storage.sqlite_saver import sqlite_checkpointer
+from app.storage.session_db import checkpoint_thread_id
 from loguru import logger
 
 from app.agent.aiops import PlanExecuteState, planner, executor, replanner
@@ -18,20 +23,20 @@ NODE_REPLANNER = "replanner"
 
 
 class AIOpsService:
-    """通用 Plan-Execute-Replan 服务"""
+    """通用 Plan-Execute-Replan 服务 (基于 SQLite 持久化 Checkpointer)"""
 
     def __init__(self):
         """初始化服务"""
-        self.checkpointer = MemorySaver()
+        self.checkpointer = sqlite_checkpointer
         self.graph = self._build_graph()
-        logger.info("Plan-Execute-Replan Service 初始化完成")
+        logger.info("Plan-Execute-Replan Service (Persistent) 初始化完成")
 
     def _build_graph(self):
         """构建 Plan-Execute-Replan 工作流"""
         logger.info("构建工作流图...")
 
         # 创建状态图
-        workflow = StateGraph(PlanExecuteState)
+        workflow = StateGraph(PlanExecuteState, context_schema=MemoryRunContext)
 
         # 添加节点
         workflow.add_node(NODE_PLANNER, planner)      # 制定计划
@@ -81,7 +86,10 @@ class AIOpsService:
     async def execute(
         self,
         user_input: str,
-        session_id: str = "default"
+        session_id: str = "default",
+        user_id: str = "sre_alice",
+        *,
+        memory_context: MemoryRunContext | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         执行 Plan-Execute-Replan 流程
@@ -100,7 +108,7 @@ class AIOpsService:
             initial_state: PlanExecuteState = {
                 "input": user_input,
                 "plan": [],
-                "past_steps": [],
+                "past_steps": Overwrite([]),
                 "response": ""
             }
 
@@ -110,14 +118,13 @@ class AIOpsService:
                 "tags": ["oncall", "aiops"],
                 "metadata": {"session_id": session_id, "thread_id": session_id},
                 "configurable": {
-                    "thread_id": session_id
+                    "thread_id": checkpoint_thread_id(user_id, session_id, "aiops")
                 }
             }
 
+            memory = bound_context(memory_context, user_id, session_id)
             async for event in self.graph.astream(
-                input=initial_state,
-                config=config_dict,
-                stream_mode="updates"
+                input=initial_state, config=config_dict, stream_mode="updates", context=memory,
             ):
                 # 解析事件
                 for node_name, node_output in event.items():
@@ -134,7 +141,7 @@ class AIOpsService:
                         yield self._format_replanner_event(node_output)
 
             # 获取最终状态
-            final_state = self.graph.get_state(config_dict)
+            final_state = await self.graph.aget_state(config_dict)
             final_response = ""
 
             # 安全地获取响应（处理 values 可能为 None 的情况）
@@ -152,16 +159,20 @@ class AIOpsService:
             logger.info(f"[会话 {session_id}] 任务执行完成")
 
         except Exception as e:
-            logger.error(f"[会话 {session_id}] 任务执行失败: {e}", exc_info=True)
+            logger.error("[会话 {}] 任务执行失败: {}", session_id, e)
             yield {
                 "type": "error",
                 "stage": "error",
-                "message": f"任务执行出错: {str(e)}"
+                "message": f"任务执行出错: {model_error_message(e)}"
             }
 
     async def diagnose(
         self,
-        session_id: str = "default"
+        session_id: str = "default",
+        user_id: str = "sre_alice",
+        *,
+        memory_context: MemoryRunContext | None = None,
+        symptoms: str | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         AIOps 诊断接口（兼容旧接口）
@@ -248,7 +259,10 @@ class AIOpsService:
                 - 所有内容必须基于工具查询的真实数据，严禁编造
                 - 如果某个步骤失败，在结论中如实说明，不要跳过""")
 
-        async for event in self.execute(aiops_task, session_id):
+        if symptoms:
+            aiops_task += f"\n\n用户报告的当前症状（待工具核实）: {symptoms}"
+
+        async for event in self.execute(aiops_task, session_id, user_id=user_id, memory_context=memory_context):
             # 转换事件格式以兼容旧的 API
             if event.get("type") == "complete":
                 # 将 response 包装为 diagnosis 格式

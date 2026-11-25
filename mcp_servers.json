@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "my-local-ops": {
+      "command": "python",
+      "args": [
+        "-u",
+        "mcp_servers/my_monitor_mcp.py"
+      ]
+    },
+    "weather": {
+      "command": "python",
+      "args": [
+        "-u",
+        "mcp_servers/weather_server.py"
+      ]
+    }
+  }
+}

@@ -8,3 +8,18 @@ from langsmith import tracing_context
 def disable_remote_tracing():
     with tracing_context(enabled=False):
         yield
+
+
+@pytest.fixture(autouse=True)
+def block_provider_network(monkeypatch):
+    """Real HTTP transports must never charge model APIs during local regression tests."""
+    import httpx
+
+    def reject_request(*args, **kwargs):
+        raise AssertionError("Real HTTP is disabled in tests; use MockTransport or a fake model")
+
+    async def reject_async_request(*args, **kwargs):
+        raise AssertionError("Real HTTP is disabled in tests; use MockTransport or a fake model")
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", reject_request)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reject_async_request)

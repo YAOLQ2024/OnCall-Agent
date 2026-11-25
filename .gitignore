@@ -83,3 +83,14 @@ dmypy.json
 # Ruff
 .ruff_cache/
 
+# 个人资料与工作区
+*个人简历*.pdf
+*.code-workspace
+
+# 原始语料
+data/corpus/raw/
+
+# 学习笔记与面试复习
+学习记录/
+面试复习/
+
